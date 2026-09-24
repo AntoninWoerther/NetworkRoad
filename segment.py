@@ -2,7 +2,7 @@ import math
 
 
 class Segment:
-    """A straight, directed road segment from one grid column to the next."""
+    """A straight, directed road segment between two adjacent grid nodes."""
 
     def __init__(self, start, end):
         self.start = start
