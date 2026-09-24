@@ -255,7 +255,7 @@ class RoadNetworkApp:
         self.side_ax.text(
             0.09,
             0.025,
-            "MOVES  →  ↗  ↘  ↑  ↓   •   verticals are rare",
+            "MOVES  →  ↗  ↘  ↑  ↓   •   angles ≥ 90°",
             color=C["cyan"],
             fontsize=7.4,
             family="monospace",
@@ -464,6 +464,28 @@ class RoadNetworkApp:
             "DR": -1,
         }
 
+        direction_vectors = {
+            "U": (0, 1),
+            "D": (0, -1),
+            "R": (1, 0),
+            "UR": (1, 1),
+            "DR": (1, -1),
+        }
+
+        def angle_is_valid(previous_direction, next_direction):
+            """
+            Reject any geometric corner below 90 degrees.
+
+            For two consecutive movement vectors a and b, the interior angle
+            of the polyline is >= 90° exactly when a·b >= 0.
+            """
+            if previous_direction == "START":
+                return True
+
+            ax, ay = direction_vectors[previous_direction]
+            bx, by = direction_vectors[next_direction]
+            return ax * bx + ay * by >= 0
+
         # Route 0 tends to be efficient. Later routes progressively accept
         # slightly more detours, producing genuinely different total distances.
         if self.route_count <= 1:
@@ -497,6 +519,9 @@ class RoadNetworkApp:
             directions = []
 
             for direction in verticals:
+                if not angle_is_valid(local_last, direction):
+                    return None
+
                 repeat = next_repeat(local_last, local_repeat, direction)
                 if repeat is None:
                     return None
@@ -509,6 +534,9 @@ class RoadNetworkApp:
                 directions.append(direction)
                 local_last = direction
                 local_repeat = repeat
+
+            if not angle_is_valid(local_last, forward):
+                return None
 
             repeat = next_repeat(local_last, local_repeat, forward)
             if repeat is None:
@@ -685,6 +713,23 @@ class RoadNetworkApp:
 
         if current != self.end_node:
             raise RuntimeError("Generated route did not finish on END.")
+
+        # Defensive check: every actual bend in the produced polyline must
+        # have an interior angle of at least 90 degrees.
+        for previous, center, following in zip(route, route[1:], route[2:]):
+            incoming = (
+                center.x - previous.x,
+                center.y - previous.y,
+            )
+            outgoing = (
+                following.x - center.x,
+                following.y - center.y,
+            )
+
+            if incoming[0] * outgoing[0] + incoming[1] * outgoing[1] < 0:
+                raise RuntimeError(
+                    "Generated route contains an angle below 90 degrees."
+                )
 
         return route
 
