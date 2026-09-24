@@ -75,9 +75,6 @@ class RoadNetworkApp:
         self.completed_build_edges = 0
 
         self.vehicles = []
-        self.build_position = 0.0
-        self.build_finished = False
-        self.last_revealed_column = -1
         self.frame_counter = 0
 
         self.fig, self.ax = self.create_window()
