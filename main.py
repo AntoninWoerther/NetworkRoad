@@ -1278,7 +1278,8 @@ class RoadNetworkApp:
 
     def update_status_text(self):
         junctions = sum(
-            node.type == NodeType.Intersection for node in self.nodes.values()
+            node.type == NodeType.Intersection
+            for node in self.nodes.values()
         )
 
         if self.paused:
@@ -1288,41 +1289,67 @@ class RoadNetworkApp:
         else:
             percent = min(
                 100,
-                int(self.build_position / max(self.max_build_stage, 1) * 100),
+                int(
+                    100
+                    * self.completed_build_edges
+                    / max(self.total_build_edges, 1)
+                ),
             )
-            state = f"BUILD {percent:02d}%"
+            direction = (
+                "→"
+                if self.build_route_index % 2 == 0
+                else "←"
+            )
+            state = (
+                f"BUILD {self.build_route_index + 1}/"
+                f"{self.route_count} {direction} {percent:02d}%"
+            )
 
         self.header_status.set_text(
-            f"SEED {self.seed:09d}   •   {self.route_count} ROUTES   •   "
-            f"{len(self.segments)} LINKS"
+            f"SEED {self.seed:09d}   •   "
+            f"{self.route_count} ROUTES   •   "
+            f"GRID {self.cols}×{self.rows}"
         )
 
         self.stat_labels["state"].set_text(state)
-        self.stat_labels["seed"].set_text(f"{self.seed:09d}")
-        self.stat_labels["segments"].set_text(str(len(self.segments)))
-        self.stat_labels["routes"].set_text(str(self.route_count))
-        self.stat_labels["intersections"].set_text(str(junctions))
-        self.stat_labels["vehicles"].set_text(str(self.vehicle_count))
-
-        shortest_text = (
+        self.stat_labels["seed"].set_text(
+            f"{self.seed:09d}"
+        )
+        self.stat_labels["grid"].set_text(
+            f"{self.cols}×{self.rows}"
+        )
+        self.stat_labels["segments"].set_text(
+            str(len(self.segments))
+        )
+        self.stat_labels["routes"].set_text(
+            str(self.route_count)
+        )
+        self.stat_labels["intersections"].set_text(
+            str(junctions)
+        )
+        self.stat_labels["vehicles"].set_text(
+            str(self.vehicle_count)
+        )
+        self.stat_labels["shortest"].set_text(
             f"{self.shortest_distance:.1f}"
             if np.isfinite(self.shortest_distance)
             else "--"
         )
-        longest_text = (
+        self.stat_labels["longest"].set_text(
             f"{max(self.route_lengths):.1f}"
             if self.route_lengths
             else "--"
         )
 
-        self.stat_labels["shortest"].set_text(shortest_text)
-        self.stat_labels["longest"].set_text(longest_text)
-
     def update(self, _frame):
         self.frame_counter += 1
 
-        # Small pulse on the endpoint rings; cheap but makes the UI feel alive.
-        pulse = 220 + 18 * np.sin(self.frame_counter * 0.08)
+        pulse = (
+            220
+            + 18 * np.sin(
+                self.frame_counter * 0.08
+            )
+        )
         self.start_ring.set_sizes([pulse])
         self.end_ring.set_sizes([pulse])
 
@@ -1330,30 +1357,34 @@ class RoadNetworkApp:
             return
 
         if not self.build_finished:
-            self.build_position += 0.095 * self.build_speed
-
-            if self.build_position >= self.max_build_stage:
-                self.build_position = self.max_build_stage
-                self.build_finished = True
-                self.build_head_scatter.set_offsets(np.empty((0, 2)))
-
+            self.advance_build()
             self.update_build_drawing()
 
-            # Updating text less often avoids unnecessary text layout work.
-            if self.frame_counter % 4 == 0 or self.build_finished:
+            if (
+                self.frame_counter % 3 == 0
+                or self.build_finished
+            ):
                 self.update_status_text()
         else:
             self.update_vehicles()
 
-    def on_route_count(self, value):
-        new_count = int(value)
-        if new_count == self.route_count:
-            return
+    def on_config_change(self, _value):
+        self.pending_route_count = int(
+            self.sliders["Routes"].val
+        )
+        self.pending_cols = int(
+            self.sliders["Columns"].val
+        )
+        self.pending_rows = int(
+            self.sliders["Rows"].val
+        )
 
-        self.route_count = new_count
-        # Same seed + new route count = deterministic variation.
-        self.generate_network(seed=self.seed, new_endpoints=True)
-        self.rebuild_scene()
+        self.seed_feedback.set_text(
+            "Configuration changed · press GENERATE"
+        )
+        self.seed_feedback.set_color(
+            C["orange"]
+        )
 
     def on_vehicle_count(self, value):
         self.vehicle_count = int(value)
@@ -1362,47 +1393,129 @@ class RoadNetworkApp:
         self.fig.canvas.draw_idle()
 
     def on_speed_change(self, _value):
-        self.build_speed = float(self.sliders["Construction"].val)
-        self.traffic_speed = float(self.sliders["Traffic"].val)
+        self.build_speed = float(
+            self.sliders["Construction"].val
+        )
+        self.traffic_speed = float(
+            self.sliders["Traffic"].val
+        )
 
-    def randomize(self, _event):
-        self.seed = random.SystemRandom().randint(0, MAX_SEED)
+    def apply_pending_configuration(self):
+        self.route_count = self.pending_route_count
+        self.cols = self.pending_cols
+        self.rows = self.pending_rows
+
+    def generate_from_controls(self, _event=None):
+        self.apply_pending_configuration()
         self.paused = False
-        self.pause_button.label.set_text("PAUSE")
+        self.pause_button.label.set_text(
+            "PAUSE"
+        )
 
-        self.generate_network(seed=self.seed, new_endpoints=True)
+        self.generate_network(
+            seed=self.seed,
+            new_endpoints=True,
+        )
+        self.rebuild_scene()
+
+        self.seed_feedback.set_text(
+            "Generated with current seed"
+        )
+        self.seed_feedback.set_color(
+            C["green"]
+        )
+
+    def randomize(self, _event=None):
+        self.apply_pending_configuration()
+        self.seed = (
+            random.SystemRandom()
+            .randint(0, MAX_SEED)
+        )
+        self.paused = False
+        self.pause_button.label.set_text(
+            "PAUSE"
+        )
+
+        self.generate_network(
+            seed=self.seed,
+            new_endpoints=True,
+        )
         self.rebuild_scene()
         self.sync_seed_box()
-        self.seed_feedback.set_text("New random seed generated")
-        self.seed_feedback.set_color(C["green"])
 
-    def new_roads_same_endpoints(self, _event):
-        new_seed = random.SystemRandom().randint(0, MAX_SEED)
+        self.seed_feedback.set_text(
+            "New random seed generated"
+        )
+        self.seed_feedback.set_color(
+            C["green"]
+        )
+
+    def new_routes_same_endpoints(self, _event=None):
+        dimensions_changed = (
+            self.pending_cols != self.cols
+            or self.pending_rows != self.rows
+        )
+
+        self.pending_route_count = int(
+            self.sliders["Routes"].val
+        )
+        self.route_count = (
+            self.pending_route_count
+        )
+        self.seed = (
+            random.SystemRandom()
+            .randint(0, MAX_SEED)
+        )
         self.paused = False
-        self.pause_button.label.set_text("PAUSE")
+        self.pause_button.label.set_text(
+            "PAUSE"
+        )
 
-        self.generate_network(seed=new_seed, new_endpoints=False)
+        if dimensions_changed:
+            self.apply_pending_configuration()
+            new_endpoints = True
+            message = (
+                "Grid changed · new endpoints generated"
+            )
+        else:
+            new_endpoints = False
+            message = (
+                "New alternating routes · "
+                "endpoints preserved"
+            )
+
+        self.generate_network(
+            seed=self.seed,
+            new_endpoints=new_endpoints,
+        )
         self.rebuild_scene()
         self.sync_seed_box()
-        self.seed_feedback.set_text("New roads · endpoints preserved")
-        self.seed_feedback.set_color(C["cyan"])
 
-    def replay(self, _event):
+        self.seed_feedback.set_text(message)
+        self.seed_feedback.set_color(
+            C["cyan"]
+        )
+
+    def replay(self, _event=None):
         self.paused = False
-        self.pause_button.label.set_text("PAUSE")
-        self.build_position = 0.0
-        self.build_finished = False
-        self.last_revealed_column = -1
+        self.pause_button.label.set_text(
+            "PAUSE"
+        )
+
+        self.reset_build_state()
         self.make_vehicles()
+        self.update_builder_color()
         self.update_build_drawing()
         self.update_status_text()
-        self.vehicle_scatter.set_offsets(np.empty((0, 2)))
-        self.vehicle_glow_scatter.set_offsets(np.empty((0, 2)))
         self.fig.canvas.draw_idle()
 
-    def toggle_pause(self, _event):
+    def toggle_pause(self, _event=None):
         self.paused = not self.paused
-        self.pause_button.label.set_text("RESUME" if self.paused else "PAUSE")
+        self.pause_button.label.set_text(
+            "RESUME"
+            if self.paused
+            else "PAUSE"
+        )
         self.update_status_text()
         self.fig.canvas.draw_idle()
 
@@ -1414,27 +1527,51 @@ class RoadNetworkApp:
             if seed < 0:
                 raise ValueError
         except ValueError:
-            self.seed_feedback.set_text("Invalid seed · use a positive integer")
-            self.seed_feedback.set_color(C["red"])
+            self.seed_feedback.set_text(
+                "Invalid seed · use a positive integer"
+            )
+            self.seed_feedback.set_color(
+                C["red"]
+            )
             return
 
-        self.seed = seed % (MAX_SEED + 1)
+        self.apply_pending_configuration()
+        self.seed = seed % (
+            MAX_SEED + 1
+        )
         self.paused = False
-        self.pause_button.label.set_text("PAUSE")
+        self.pause_button.label.set_text(
+            "PAUSE"
+        )
 
-        self.generate_network(seed=self.seed, new_endpoints=True)
+        self.generate_network(
+            seed=self.seed,
+            new_endpoints=True,
+        )
         self.rebuild_scene()
         self.sync_seed_box()
-        self.seed_feedback.set_text("Seed loaded · network reproduced")
-        self.seed_feedback.set_color(C["green"])
+
+        self.seed_feedback.set_text(
+            "Seed loaded · network reproduced"
+        )
+        self.seed_feedback.set_color(
+            C["green"]
+        )
 
     def sync_seed_box(self):
-        if not hasattr(self, "seed_box"):
+        if not hasattr(
+            self,
+            "seed_box",
+        ):
             return
 
-        previous = self.seed_box.eventson
+        previous = (
+            self.seed_box.eventson
+        )
         self.seed_box.eventson = False
-        self.seed_box.set_val(str(self.seed))
+        self.seed_box.set_val(
+            str(self.seed)
+        )
         self.seed_box.eventson = previous
 
     def show(self):
