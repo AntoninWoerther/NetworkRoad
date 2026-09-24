@@ -3,6 +3,7 @@ import random
 from collections import defaultdict
 
 import matplotlib.pyplot as plt
+import numpy as np
 from matplotlib.animation import FuncAnimation
 from matplotlib.widgets import Button, Slider
 
@@ -716,14 +717,14 @@ class RoadNetworkApp:
                 list(zip(intersections_x, intersections_y))
             )
         else:
-            self.intersection_scatter.set_offsets([])
+            self.intersection_scatter.set_offsets(np.empty((0, 2)))
 
         if connections_x:
             self.connection_scatter.set_offsets(
                 list(zip(connections_x, connections_y))
             )
         else:
-            self.connection_scatter.set_offsets([])
+            self.connection_scatter.set_offsets(np.empty((0, 2)))
 
     # ------------------------------------------------------------------
     # VEHICLES
@@ -765,7 +766,7 @@ class RoadNetworkApp:
 
     def update_vehicles(self):
         if not self.build_finished:
-            self.vehicle_scatter.set_offsets([])
+            self.vehicle_scatter.set_offsets(np.empty((0, 2)))
             return
 
         positions = []
@@ -893,7 +894,7 @@ class RoadNetworkApp:
         self.make_vehicles()
         self.update_build_drawing()
         self.update_status_text()
-        self.vehicle_scatter.set_offsets([])
+        self.vehicle_scatter.set_offsets(np.empty((0, 2)))
         self.fig.canvas.draw_idle()
 
     def toggle_pause(self, _event):
