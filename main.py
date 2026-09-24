@@ -1128,111 +1128,149 @@ class RoadNetworkApp:
     # VEHICLES
     # ------------------------------------------------------------------
 
+    def route_for_traffic_direction(self, route_index, direction):
+        route = self.routes[route_index]
+        desired_start = (
+            self.start_node
+            if direction == 1
+            else self.end_node
+        )
+
+        if route[0] == desired_start:
+            return route
+
+        return list(reversed(route))
+
     def make_vehicles(self):
-        """
-        Vehicles follow complete generated routes instead of choosing arbitrary
-        graph edges. This guarantees that vertical junctions can never trap a
-        vehicle in a loop and every vehicle eventually reaches END.
-        """
         self.vehicles = []
 
-        valid_routes = [
-            route for route in self.routes
-            if len(route) >= 2
-        ]
-
-        if not valid_routes:
+        if not self.routes:
             return
 
         for index in range(self.vehicle_count):
-            route_index = index % len(valid_routes)
-            route = valid_routes[route_index]
-            edge_count = len(route) - 1
-
-            # Spread particles across the already-built network.
-            edge_index = int(
-                (index / max(self.vehicle_count, 1)) * edge_count
+            direction = 1 if index % 2 == 0 else -1
+            route_index = index % len(self.routes)
+            path = self.route_for_traffic_direction(
+                route_index,
+                direction,
             )
-            edge_index = min(edge_index, edge_count - 1)
 
-            a = route[edge_index]
-            b = route[edge_index + 1]
-            segment = self.segment_by_key[(a.id, b.id)]
+            if len(path) < 2:
+                continue
 
-            self.vehicles.append(
-                {
-                    "route_index": route_index,
-                    "edge_index": edge_index,
-                    "segment": segment,
-                    "progress": 0.0,
-                    "speed": self.rng.uniform(0.040, 0.070),
-                }
-            )
+            self.vehicles.append({
+                "direction": direction,
+                "route_index": route_index,
+                "path": path,
+                "edge_index": 0,
+                "progress": (
+                    index
+                    / max(self.vehicle_count, 1)
+                ) * 0.85,
+                "speed": self.rng.uniform(
+                    0.040,
+                    0.070,
+                ),
+            })
 
     def restart_vehicle(self, vehicle):
-        if not self.routes:
-            return False
-
-        vehicle["route_index"] = self.rng.randrange(len(self.routes))
-        route = self.routes[vehicle["route_index"]]
-
-        if len(route) < 2:
-            return False
-
+        vehicle["route_index"] = self.rng.randrange(
+            len(self.routes)
+        )
+        vehicle["path"] = self.route_for_traffic_direction(
+            vehicle["route_index"],
+            vehicle["direction"],
+        )
         vehicle["edge_index"] = 0
-        a = route[0]
-        b = route[1]
-        vehicle["segment"] = self.segment_by_key[(a.id, b.id)]
         vehicle["progress"] = 0.0
-        return True
 
     def update_vehicles(self):
         if not self.build_finished:
-            self.vehicle_scatter.set_offsets(np.empty((0, 2)))
-            self.vehicle_glow_scatter.set_offsets(np.empty((0, 2)))
+            empty = np.empty((0, 2))
+            self.vehicle_out.set_offsets(empty)
+            self.vehicle_out_glow.set_offsets(empty)
+            self.vehicle_back.set_offsets(empty)
+            self.vehicle_back_glow.set_offsets(empty)
             return
 
-        positions = []
+        outbound = []
+        inbound = []
 
         for vehicle in self.vehicles:
-            remaining_distance = vehicle["speed"] * self.traffic_speed
-
-            while remaining_distance > 0:
-                segment = vehicle["segment"]
-                segment_remaining = (
-                    1.0 - vehicle["progress"]
-                ) * max(segment.length, 1e-9)
-
-                if remaining_distance < segment_remaining:
-                    vehicle["progress"] += (
-                        remaining_distance / max(segment.length, 1e-9)
-                    )
-                    remaining_distance = 0.0
-                    break
-
-                remaining_distance -= segment_remaining
-
-                route = self.routes[vehicle["route_index"]]
-                vehicle["edge_index"] += 1
-
-                if vehicle["edge_index"] >= len(route) - 1:
-                    if not self.restart_vehicle(vehicle):
-                        remaining_distance = 0.0
-                        break
-                    continue
-
-                a = route[vehicle["edge_index"]]
-                b = route[vehicle["edge_index"] + 1]
-                vehicle["segment"] = self.segment_by_key[(a.id, b.id)]
-                vehicle["progress"] = 0.0
-
-            positions.append(
-                vehicle["segment"].point_at(vehicle["progress"])
+            remaining = (
+                vehicle["speed"]
+                * self.traffic_speed
             )
 
-        offsets = positions if positions else np.empty((0, 2))
-        self.vehicle_glow_scatter.set_offsets(offsets)
-        self.vehicle_scatter.set_offsets(offsets)
+            while remaining > 0:
+                path = vehicle["path"]
+                edge_index = vehicle["edge_index"]
+
+                if edge_index >= len(path) - 1:
+                    self.restart_vehicle(vehicle)
+                    continue
+
+                a = path[edge_index]
+                b = path[edge_index + 1]
+                length = max(
+                    np.hypot(
+                        b.x - a.x,
+                        b.y - a.y,
+                    ),
+                    1e-9,
+                )
+
+                edge_remaining = (
+                    1.0 - vehicle["progress"]
+                ) * length
+
+                if remaining < edge_remaining:
+                    vehicle["progress"] += (
+                        remaining / length
+                    )
+                    remaining = 0.0
+                else:
+                    remaining -= edge_remaining
+                    vehicle["edge_index"] += 1
+                    vehicle["progress"] = 0.0
+
+                    if (
+                        vehicle["edge_index"]
+                        >= len(path) - 1
+                    ):
+                        self.restart_vehicle(vehicle)
+
+            path = vehicle["path"]
+            edge_index = min(
+                vehicle["edge_index"],
+                len(path) - 2,
+            )
+            point = self.interpolate_nodes(
+                path[edge_index],
+                path[edge_index + 1],
+                vehicle["progress"],
+            )
+
+            if vehicle["direction"] == 1:
+                outbound.append(point)
+            else:
+                inbound.append(point)
+
+        out_offsets = (
+            outbound
+            if outbound
+            else np.empty((0, 2))
+        )
+        back_offsets = (
+            inbound
+            if inbound
+            else np.empty((0, 2))
+        )
+
+        self.vehicle_out.set_offsets(out_offsets)
+        self.vehicle_out_glow.set_offsets(out_offsets)
+        self.vehicle_back.set_offsets(back_offsets)
+        self.vehicle_back_glow.set_offsets(back_offsets)
 
     # ------------------------------------------------------------------
     # STATE / CALLBACKS
