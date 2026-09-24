@@ -30,6 +30,7 @@ C = {
     "green": "#31E6A1",
     "red": "#FF6078",
     "orange": "#FFB84A",
+    "purple": "#B779FF",
     "white": "#F4F8FB",
     "muted": "#7890A3",
 }
@@ -44,6 +45,10 @@ class RoadNetworkApp:
         self.build_speed = 1.0
         self.traffic_speed = 3.0
 
+        self.pending_cols = self.cols
+        self.pending_rows = self.rows
+        self.pending_route_count = self.route_count
+
         self.paused = False
         self.seed = random.SystemRandom().randint(0, MAX_SEED)
         self.rng = random.Random(self.seed)
@@ -52,7 +57,7 @@ class RoadNetworkApp:
         self.routes = []
         self.segments = []
         self.segment_by_key = {}
-        self.forward_graph = defaultdict(list)
+        self.graph = defaultdict(list)
         self.node_usage = defaultdict(int)
 
         self.start_node = None
@@ -60,8 +65,14 @@ class RoadNetworkApp:
         self.shortest_path_keys = set()
         self.shortest_distance = 0.0
         self.route_lengths = []
-        self.segment_build_stage = {}
-        self.max_build_stage = 1
+
+        self.built_segment_keys = set()
+        self.build_route_index = 0
+        self.build_edge_index = 0
+        self.build_edge_progress = 0.0
+        self.build_finished = False
+        self.total_build_edges = 1
+        self.completed_build_edges = 0
 
         self.vehicles = []
         self.build_position = 0.0
@@ -98,7 +109,7 @@ class RoadNetworkApp:
         except Exception:
             pass
 
-        ax = fig.add_axes([0.045, 0.235, 0.705, 0.615])
+        ax = fig.add_axes([0.045, 0.245, 0.705, 0.605])
         ax.set_facecolor(C["bg"])
         ax.set_xlim(-0.9, self.cols - 0.1)
         ax.set_ylim(-0.9, self.rows - 0.1)
@@ -109,29 +120,17 @@ class RoadNetworkApp:
 
     def create_interface(self):
         self.fig.text(
-            0.05,
-            0.955,
-            "ROAD NETWORK",
-            color=C["white"],
-            fontsize=24,
-            fontweight="bold",
+            0.05, 0.955, "ROAD NETWORK",
+            color=C["white"], fontsize=24, fontweight="bold",
         )
-
         self.fig.text(
-            0.05,
-            0.922,
-            "Procedural routing engine  /  forward + vertical moves  /  deterministic seeds",
-            color=C["muted"],
-            fontsize=10,
+            0.05, 0.922,
+            "Sequential procedural routes  /  two-way traffic  /  deterministic seeds",
+            color=C["muted"], fontsize=10,
         )
-
         self.header_status = self.fig.text(
-            0.05,
-            0.882,
-            "",
-            color=C["cyan"],
-            fontsize=9.5,
-            family="monospace",
+            0.05, 0.882, "",
+            color=C["cyan"], fontsize=9.5, family="monospace",
             bbox={
                 "boxstyle": "round,pad=0.45",
                 "facecolor": C["panel"],
@@ -140,8 +139,7 @@ class RoadNetworkApp:
             },
         )
 
-        # ---------- side card ----------
-        self.side_ax = self.fig.add_axes([0.775, 0.235, 0.195, 0.615])
+        self.side_ax = self.fig.add_axes([0.775, 0.245, 0.195, 0.605])
         self.side_ax.set_facecolor(C["panel"])
         self.side_ax.set_xlim(0, 1)
         self.side_ax.set_ylim(0, 1)
@@ -153,36 +151,23 @@ class RoadNetworkApp:
             spine.set_linewidth(1.1)
 
         self.side_ax.text(
-            0.09,
-            0.94,
-            "NETWORK STATUS",
-            color=C["white"],
-            fontsize=12,
-            fontweight="bold",
-            va="top",
+            0.09, 0.94, "NETWORK STATUS",
+            color=C["white"], fontsize=12, fontweight="bold", va="top",
         )
-
         self.side_ax.text(
-            0.09,
-            0.895,
-            "LIVE SIMULATION",
-            color=C["cyan"],
-            fontsize=7.5,
-            family="monospace",
-            va="top",
+            0.09, 0.895, "LIVE SIMULATION",
+            color=C["cyan"], fontsize=7.5, family="monospace", va="top",
         )
-
         self.side_ax.plot(
-            [0.09, 0.91],
-            [0.855, 0.855],
-            color=C["border"],
-            linewidth=1,
+            [0.09, 0.91], [0.855, 0.855],
+            color=C["border"], linewidth=1,
         )
 
         self.stat_labels = {}
         stat_rows = [
             ("state", "State"),
             ("seed", "Seed"),
+            ("grid", "Grid"),
             ("segments", "Segments"),
             ("routes", "Routes"),
             ("intersections", "Junctions"),
@@ -191,122 +176,115 @@ class RoadNetworkApp:
             ("longest", "Longest"),
         ]
 
-        y = 0.80
+        y = 0.805
         for key, label in stat_rows:
             self.side_ax.text(
-                0.09,
-                y,
-                label.upper(),
-                color=C["muted"],
-                fontsize=8,
-                family="monospace",
-                va="center",
+                0.09, y, label.upper(),
+                color=C["muted"], fontsize=7.8,
+                family="monospace", va="center",
             )
             self.stat_labels[key] = self.side_ax.text(
-                0.91,
-                y,
-                "",
-                color=C["white"],
-                fontsize=9.2,
-                family="monospace",
-                ha="right",
-                va="center",
+                0.91, y, "",
+                color=C["white"], fontsize=8.9,
+                family="monospace", ha="right", va="center",
             )
-            y -= 0.051
+            y -= 0.044
 
         self.side_ax.plot(
-            [0.09, 0.91],
-            [0.385, 0.385],
-            color=C["border"],
-            linewidth=1,
+            [0.09, 0.91], [0.385, 0.385],
+            color=C["border"], linewidth=1,
         )
-
         self.side_ax.text(
-            0.09,
-            0.345,
-            "LEGEND",
-            color=C["white"],
-            fontsize=9.5,
-            fontweight="bold",
+            0.09, 0.345, "LEGEND",
+            color=C["white"], fontsize=9.5, fontweight="bold",
         )
 
         legend = [
             (C["green"], "Start"),
             (C["red"], "End"),
             (C["orange"], "Junction"),
-            (C["road"], "Connection"),
+            (C["road"], "Road"),
             (C["cyan"], "Shortest path"),
+            (C["cyan"], "Traffic START → END"),
+            (C["purple"], "Traffic END → START"),
         ]
 
-        y = 0.295
+        y = 0.303
         for color, label in legend:
-            self.side_ax.scatter([0.13], [y], s=58, color=color, zorder=2)
+            self.side_ax.scatter([0.13], [y], s=52, color=color, zorder=2)
             self.side_ax.text(
-                0.23,
-                y,
-                label,
-                color=C["white"],
-                fontsize=8.8,
-                va="center",
+                0.23, y, label,
+                color=C["white"], fontsize=8.1, va="center",
             )
-            y -= 0.048
+            y -= 0.039
 
-        # A dedicated rule card prevents the old legend/text overlap.
         self.side_ax.text(
-            0.09,
-            0.025,
-            "MOVES  →  ↗  ↘  ↑  ↓   •   angles ≥ 90°",
-            color=C["cyan"],
-            fontsize=7.4,
-            family="monospace",
-            va="bottom",
+            0.09, 0.018,
+            "ROUTES alternate START→END / END→START",
+            color=C["cyan"], fontsize=6.9,
+            family="monospace", va="bottom",
         )
 
-        # ---------- controls ----------
         self.fig.text(
-            0.05,
-            0.185,
-            "CONTROLS",
-            color=C["muted"],
-            fontsize=8,
-            family="monospace",
+            0.05, 0.205, "CONFIGURATION",
+            color=C["muted"], fontsize=8, family="monospace",
         )
 
         self.sliders = {}
         self.sliders["Routes"] = self.make_slider(
-            [0.075, 0.135, 0.205, 0.020], "Routes", 1, 9, self.route_count, 1
+            [0.075, 0.155, 0.18, 0.019],
+            "Routes", 1, 9, self.route_count, 1,
         )
         self.sliders["Vehicles"] = self.make_slider(
-            [0.075, 0.087, 0.205, 0.020], "Vehicles", 1, 30, self.vehicle_count, 1
+            [0.345, 0.155, 0.18, 0.019],
+            "Vehicles", 2, 30, self.vehicle_count, 1,
+        )
+        self.sliders["Columns"] = self.make_slider(
+            [0.075, 0.110, 0.18, 0.019],
+            "Columns", 12, 36, self.cols, 1,
+        )
+        self.sliders["Rows"] = self.make_slider(
+            [0.345, 0.110, 0.18, 0.019],
+            "Rows", 8, 20, self.rows, 1,
         )
         self.sliders["Construction"] = self.make_slider(
-            [0.355, 0.135, 0.205, 0.020], "Build", 0.25, 4.0, self.build_speed, None
+            [0.075, 0.065, 0.18, 0.019],
+            "Build", 0.25, 4.0, self.build_speed, None,
         )
         self.sliders["Traffic"] = self.make_slider(
-            [0.355, 0.087, 0.205, 0.020], "Traffic", 0.25, 8.0, self.traffic_speed, None
+            [0.345, 0.065, 0.18, 0.019],
+            "Traffic", 0.25, 8.0, self.traffic_speed, None,
         )
 
-        self.sliders["Routes"].on_changed(self.on_route_count)
+        self.sliders["Routes"].on_changed(self.on_config_change)
+        self.sliders["Columns"].on_changed(self.on_config_change)
+        self.sliders["Rows"].on_changed(self.on_config_change)
         self.sliders["Vehicles"].on_changed(self.on_vehicle_count)
         self.sliders["Construction"].on_changed(self.on_speed_change)
         self.sliders["Traffic"].on_changed(self.on_speed_change)
 
-        self.random_button = self.make_button([0.60, 0.132, 0.095, 0.045], "RANDOMIZE")
-        self.pause_button = self.make_button([0.705, 0.132, 0.075, 0.045], "PAUSE")
-        self.replay_button = self.make_button([0.79, 0.132, 0.075, 0.045], "REPLAY")
-
+        self.generate_button = self.make_button(
+            [0.58, 0.152, 0.105, 0.044], "GENERATE"
+        )
+        self.random_button = self.make_button(
+            [0.695, 0.152, 0.095, 0.044], "RANDOMIZE"
+        )
+        self.pause_button = self.make_button(
+            [0.80, 0.152, 0.075, 0.044], "PAUSE"
+        )
+        self.replay_button = self.make_button(
+            [0.885, 0.152, 0.075, 0.044], "REPLAY"
+        )
         self.new_path_button = self.make_button(
-            [0.60, 0.075, 0.18, 0.040], "NEW ROADS · SAME ENDS"
+            [0.58, 0.098, 0.19, 0.038],
+            "NEW ROUTES · SAME ENDS",
         )
 
-        seed_ax = self.fig.add_axes([0.80, 0.075, 0.105, 0.040])
+        seed_ax = self.fig.add_axes([0.79, 0.098, 0.105, 0.038])
         seed_ax.set_facecolor(C["panel"])
         self.seed_box = TextBox(
-            seed_ax,
-            "",
-            initial=str(self.seed),
-            color=C["panel"],
-            hovercolor=C["panel_2"],
+            seed_ax, "", initial=str(self.seed),
+            color=C["panel"], hovercolor=C["panel_2"],
         )
         self.seed_box.text_disp.set_color(C["white"])
         self.seed_box.text_disp.set_fontfamily("monospace")
@@ -314,29 +292,24 @@ class RoadNetworkApp:
         for spine in seed_ax.spines.values():
             spine.set_color(C["border"])
 
-        self.load_seed_button = self.make_button([0.915, 0.075, 0.055, 0.040], "LOAD")
-
+        self.load_seed_button = self.make_button(
+            [0.905, 0.098, 0.055, 0.038], "LOAD"
+        )
         self.fig.text(
-            0.80,
-            0.119,
-            "SEED",
-            color=C["muted"],
-            fontsize=7.5,
-            family="monospace",
+            0.79, 0.139, "SEED",
+            color=C["muted"], fontsize=7.3, family="monospace",
         )
-
         self.seed_feedback = self.fig.text(
-            0.80,
-            0.052,
-            "Enter a seed to reproduce a network",
-            color=C["muted"],
-            fontsize=7.2,
+            0.58, 0.058,
+            "Change grid/routes, then press GENERATE",
+            color=C["muted"], fontsize=7.2,
         )
 
+        self.generate_button.on_clicked(self.generate_from_controls)
         self.random_button.on_clicked(self.randomize)
         self.pause_button.on_clicked(self.toggle_pause)
         self.replay_button.on_clicked(self.replay)
-        self.new_path_button.on_clicked(self.new_roads_same_endpoints)
+        self.new_path_button.on_clicked(self.new_routes_same_endpoints)
         self.load_seed_button.on_clicked(self.load_seed)
         self.seed_box.on_submit(self.load_seed)
 
