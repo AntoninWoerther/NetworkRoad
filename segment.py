@@ -2,12 +2,12 @@ import math
 
 
 class Segment:
-    """A straight, directed road segment between two adjacent grid nodes."""
+    """A straight road segment between two adjacent grid nodes."""
 
     def __init__(self, start, end):
         self.start = start
         self.end = end
-        self.key = (start.id, end.id)
+        self.key = tuple(sorted((start.id, end.id)))
         self.length = math.hypot(end.x - start.x, end.y - start.y)
 
     def point_at(self, t):
