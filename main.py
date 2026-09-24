@@ -42,7 +42,7 @@ class RoadNetworkApp:
         self.route_count = 5
         self.vehicle_count = 10
         self.build_speed = 1.0
-        self.traffic_speed = 1.0
+        self.traffic_speed = 3.0
 
         self.paused = False
         self.seed = random.SystemRandom().randint(0, MAX_SEED)
@@ -54,10 +54,16 @@ class RoadNetworkApp:
         self.segment_by_key = {}
         self.forward_graph = defaultdict(list)
         self.node_usage = defaultdict(int)
+        self.segment_build_stage = {}
+        self.route_lengths = []
 
         self.start_node = None
         self.end_node = None
         self.shortest_path_keys = set()
+        self.shortest_distance = 0.0
+        self.route_lengths = []
+        self.segment_build_stage = {}
+        self.max_build_stage = 1
 
         self.vehicles = []
         self.build_position = 0.0
@@ -183,6 +189,8 @@ class RoadNetworkApp:
             ("routes", "Routes"),
             ("intersections", "Junctions"),
             ("vehicles", "Vehicles"),
+            ("shortest", "Shortest"),
+            ("longest", "Longest"),
         ]
 
         y = 0.80
@@ -206,7 +214,7 @@ class RoadNetworkApp:
                 ha="right",
                 va="center",
             )
-            y -= 0.064
+            y -= 0.051
 
         self.side_ax.plot(
             [0.09, 0.91],
@@ -249,7 +257,7 @@ class RoadNetworkApp:
         self.side_ax.text(
             0.09,
             0.025,
-            "MOVES  →  ↗  ↘  ↑  ↓   •   max 2 repeats",
+            "MOVES  →  ↗  ↘  ↑  ↓   •   verticals are rare",
             color=C["cyan"],
             fontsize=7.4,
             family="monospace",
@@ -277,7 +285,7 @@ class RoadNetworkApp:
             [0.355, 0.135, 0.205, 0.020], "Build", 0.25, 4.0, self.build_speed, None
         )
         self.sliders["Traffic"] = self.make_slider(
-            [0.355, 0.087, 0.205, 0.020], "Traffic", 0.25, 4.0, self.traffic_speed, None
+            [0.355, 0.087, 0.205, 0.020], "Traffic", 0.25, 8.0, self.traffic_speed, None
         )
 
         self.sliders["Routes"].on_changed(self.on_route_count)
@@ -414,26 +422,34 @@ class RoadNetworkApp:
             for node in route:
                 self.node_usage[node] += 1
 
-            for a, b in zip(route, route[1:]):
-                self.register_segment(a, b)
+            route_length = 0.0
+
+            for step_index, (a, b) in enumerate(zip(route, route[1:])):
+                segment = self.register_segment(a, b)
+                route_length += segment.length
+
+                key = (segment.start.id, segment.end.id)
+                old_stage = self.segment_build_stage.get(key)
+                if old_stage is None or step_index < old_stage:
+                    self.segment_build_stage[key] = step_index
+
+            self.route_lengths.append(route_length)
+
+        self.max_build_stage = max(
+            self.segment_build_stage.values(),
+            default=0,
+        ) + 1
 
         self.classify_nodes()
         self.compute_shortest_path()
 
     def generate_route(self, route_index):
         """
-        Generate one deterministic random route from START to END.
+        Generate a connected route from START to END.
 
-        Allowed moves:
-            RIGHT       ( +1,  0 )
-            UP-RIGHT    ( +1, +1 )
-            DOWN-RIGHT  ( +1, -1 )
-            UP          (  0, +1 )
-            DOWN        (  0, -1 )
-
-        LEFT is impossible. A direction may never be repeated more than twice
-        consecutively. Vertical moves are grouped before the forward move of a
-        column, which keeps the search acyclic and guarantees that END is reached.
+        Horizontal/diagonal moves remain dominant. Pure vertical moves are
+        deliberately rare and only exist as short detours. LEFT is impossible
+        and no direction can be repeated more than twice in a row.
         """
         end_x = self.end_node.x
         end_y = self.end_node.y
@@ -446,12 +462,21 @@ class RoadNetworkApp:
             "DR": -1,
         }
 
+        # Route 0 tends to be efficient. Later routes progressively accept
+        # slightly more detours, producing genuinely different total distances.
+        if self.route_count <= 1:
+            detour_profile = 0.0
+        else:
+            detour_profile = route_index / (self.route_count - 1)
+
+        vertical_chance = 0.01 + 0.06 * detour_profile
+
         vertical_patterns = [
-            (),
-            ("U",),
-            ("U", "U"),
-            ("D",),
-            ("D", "D"),
+            ((), 1.0 - vertical_chance),
+            (("U",), vertical_chance * 0.47),
+            (("D",), vertical_chance * 0.47),
+            (("U", "U"), vertical_chance * 0.03),
+            (("D", "D"), vertical_chance * 0.03),
         ]
 
         forward_moves = ("R", "UR", "DR")
@@ -463,10 +488,6 @@ class RoadNetworkApp:
             return count
 
         def simulate_action(x, y, last_direction, repeat_count, verticals, forward):
-            """
-            Simulate vertical moves in the current column, followed by exactly
-            one move to x + 1. Returns the generated nodes and final state.
-            """
             local_y = y
             local_last = last_direction
             local_repeat = repeat_count
@@ -510,16 +531,10 @@ class RoadNetworkApp:
 
         @lru_cache(maxsize=None)
         def can_finish(x, y, last_direction, repeat_count):
-            """
-            Dynamic-programming feasibility test.
-
-            Because every action finishes with x + 1, recursion always advances
-            toward END and cannot loop, even though vertical edges are allowed.
-            """
             if x == end_x:
                 return y == end_y
 
-            for verticals in vertical_patterns:
+            for verticals, _pattern_weight in vertical_patterns:
                 for forward in forward_moves:
                     result = simulate_action(
                         x,
@@ -562,8 +577,9 @@ class RoadNetworkApp:
 
         while current.x < end_x:
             candidates = []
+            weights = []
 
-            for verticals in vertical_patterns:
+            for verticals, pattern_weight in vertical_patterns:
                 for forward in forward_moves:
                     result = simulate_action(
                         current.x,
@@ -597,76 +613,70 @@ class RoadNetworkApp:
                     ):
                         continue
 
-                    # The last edge is always the forward/diagonal edge.
-                    forward_from = (
-                        current if len(nodes) == 1 else nodes[-2]
-                    )
+                    forward_from = current if len(nodes) == 1 else nodes[-2]
                     forward_to = nodes[-1]
 
-                    crossing_penalty = (
-                        1.10
-                        if self.edge_would_cross(forward_from, forward_to)
-                        else 0.0
+                    crossing = self.edge_would_cross(
+                        forward_from,
+                        forward_to,
                     )
 
-                    reuse_penalty = (
-                        sum(self.node_usage.get(node, 0) for node in nodes)
-                        * 0.34
+                    before_distance = abs(end_y - current.y)
+                    after_distance = abs(end_y - next_y)
+                    improvement = before_distance - after_distance
+
+                    if forward == "R":
+                        forward_weight = 1.45
+                    elif improvement > 0:
+                        forward_weight = 1.75
+                    elif improvement == 0:
+                        forward_weight = 1.0
+                    else:
+                        # Detour-oriented routes can wander a little more.
+                        forward_weight = 0.35 + 0.55 * detour_profile
+
+                    reuse = sum(
+                        self.node_usage.get(node, 0)
+                        for node in nodes
                     )
 
-                    # Encourage visible vertical roads without making every
-                    # column vertical. One vertical move is common; two are rarer.
-                    vertical_count = len(verticals)
-                    vertical_bonus = 0.24 if vertical_count == 1 else 0.08 if vertical_count == 2 else 0.0
+                    weight = pattern_weight * forward_weight
+                    weight /= 1.0 + reuse * 0.55
 
-                    target_pull = abs(end_y - next_y) * 0.025
+                    if crossing:
+                        weight *= 0.10
 
-                    lane = (
-                        route_index - (self.route_count - 1) / 2
-                    ) * 0.030
-                    lane_bonus = lane * (next_y - self.rows / 2)
-
-                    # Prefer changing direction after two repeated moves and keep
-                    # the geometry varied but readable.
-                    turn_bonus = (
-                        0.10
-                        if directions[0] != last_direction
-                        else 0.0
-                    )
-
-                    score = (
-                        self.rng.random()
-                        + vertical_bonus
-                        + lane_bonus
-                        + turn_bonus
-                        - reuse_penalty
-                        - crossing_penalty
-                        - target_pull
-                    )
+                    # Keep the efficient route especially clean.
+                    if route_index == 0 and verticals:
+                        weight *= 0.12
 
                     candidates.append(
                         (
-                            score,
                             nodes,
                             directions,
                             next_last,
                             next_count,
                         )
                     )
+                    weights.append(max(weight, 1e-8))
 
             if not candidates:
                 raise RuntimeError(
                     "No valid route can reach END with the current movement rules."
                 )
 
-            candidates.sort(key=lambda item: item[0], reverse=True)
+            chosen_index = self.rng.choices(
+                range(len(candidates)),
+                weights=weights,
+                k=1,
+            )[0]
+
             (
-                _score,
                 chosen_nodes,
-                chosen_directions,
+                _chosen_directions,
                 last_direction,
                 repeat_count,
-            ) = candidates[0]
+            ) = candidates[chosen_index]
 
             route.extend(chosen_nodes)
             current = chosen_nodes[-1]
@@ -748,6 +758,11 @@ class RoadNetworkApp:
                     distances[neighbour] = candidate
                     previous[neighbour] = (node, segment)
                     heapq.heappush(queue, (candidate, neighbour.id, neighbour))
+
+        self.shortest_distance = distances.get(
+            self.end_node,
+            float("inf"),
+        )
 
         node = self.end_node
         while node in previous:
@@ -855,16 +870,23 @@ class RoadNetworkApp:
         heads = []
 
         for segment in self.segments:
-            progress = max(0.0, min(1.0, self.build_position - segment.start.x))
+            key = (segment.start.id, segment.end.id)
+            stage = self.segment_build_stage.get(key, 0)
+            progress = max(
+                0.0,
+                min(1.0, self.build_position - stage),
+            )
 
             if progress <= 0.0:
                 continue
 
             x, y = segment.point_at(progress)
-            line = [(segment.start.x, segment.start.y), (x, y)]
+            line = [
+                (segment.start.x, segment.start.y),
+                (x, y),
+            ]
             roads.append(line)
 
-            key = (segment.start.id, segment.end.id)
             if key in self.shortest_path_keys:
                 shortest.append(line)
 
@@ -875,24 +897,30 @@ class RoadNetworkApp:
         self.road_lines.set_segments(roads)
         self.path_glow.set_segments(shortest)
 
-        if heads:
-            self.build_head_scatter.set_offsets(heads)
-        else:
-            self.build_head_scatter.set_offsets(np.empty((0, 2)))
+        self.build_head_scatter.set_offsets(
+            heads if heads else np.empty((0, 2))
+        )
 
-        reveal_column = min(self.cols - 1, int(self.build_position + 0.02))
-        if reveal_column != self.last_revealed_column:
-            self.last_revealed_column = reveal_column
-            self.update_visible_nodes(reveal_column)
+        reveal_stage = int(self.build_position + 0.02)
+        if reveal_stage != self.last_revealed_column:
+            self.last_revealed_column = reveal_stage
+            self.update_visible_nodes(reveal_stage)
 
-    def update_visible_nodes(self, reveal_column):
+    def update_visible_nodes(self, reveal_stage):
+        visible_nodes = {self.start_node, self.end_node}
+
+        for segment in self.segments:
+            key = (segment.start.id, segment.end.id)
+            stage = self.segment_build_stage.get(key, 0)
+
+            if stage <= reveal_stage:
+                visible_nodes.add(segment.start)
+                visible_nodes.add(segment.end)
+
         junctions = []
         connections = []
 
-        for node in self.nodes.values():
-            if node.x > reveal_column:
-                continue
-
+        for node in visible_nodes:
             if node.type == NodeType.Intersection:
                 junctions.append((node.x, node.y))
             elif node.type == NodeType.Connection:
@@ -946,7 +974,7 @@ class RoadNetworkApp:
                     "edge_index": edge_index,
                     "segment": segment,
                     "progress": 0.0,
-                    "speed": self.rng.uniform(0.015, 0.026),
+                    "speed": self.rng.uniform(0.040, 0.070),
                 }
             )
 
@@ -1029,7 +1057,10 @@ class RoadNetworkApp:
         elif self.build_finished:
             state = "TRAFFIC"
         else:
-            percent = min(100, int(self.build_position / (self.cols - 1) * 100))
+            percent = min(
+                100,
+                int(self.build_position / max(self.max_build_stage, 1) * 100),
+            )
             state = f"BUILD {percent:02d}%"
 
         self.header_status.set_text(
@@ -1043,6 +1074,20 @@ class RoadNetworkApp:
         self.stat_labels["routes"].set_text(str(self.route_count))
         self.stat_labels["intersections"].set_text(str(junctions))
         self.stat_labels["vehicles"].set_text(str(self.vehicle_count))
+
+        shortest_text = (
+            f"{self.shortest_distance:.1f}"
+            if np.isfinite(self.shortest_distance)
+            else "--"
+        )
+        longest_text = (
+            f"{max(self.route_lengths):.1f}"
+            if self.route_lengths
+            else "--"
+        )
+
+        self.stat_labels["shortest"].set_text(shortest_text)
+        self.stat_labels["longest"].set_text(longest_text)
 
     def update(self, _frame):
         self.frame_counter += 1
@@ -1058,8 +1103,8 @@ class RoadNetworkApp:
         if not self.build_finished:
             self.build_position += 0.095 * self.build_speed
 
-            if self.build_position >= self.cols - 1:
-                self.build_position = self.cols - 1
+            if self.build_position >= self.max_build_stage:
+                self.build_position = self.max_build_stage
                 self.build_finished = True
                 self.build_head_scatter.set_offsets(np.empty((0, 2)))
 
