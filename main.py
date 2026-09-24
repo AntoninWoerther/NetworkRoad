@@ -226,11 +226,18 @@ class RoadNetworkApp:
                 node_id = y * self.cols + x
                 self.nodes[(x, y)] = Node(node_id, x, y)
 
-    def neighbours(self, node):
+    def forward_neighbours(self, node):
+        """Only nodes in the next column are valid: never go backwards."""
         result = []
 
-        for dx, dy in ((1, 0), (-1, 0), (0, 1), (0, -1)):
-            key = (node.x + dx, node.y + dy)
+        next_x = node.x + 1
+        if next_x >= self.cols:
+            return result
+
+        for dy in (-1, 0, 1):
+            next_y = node.y + dy
+            key = (next_x, next_y)
+
             if key in self.nodes:
                 result.append(self.nodes[key])
 
@@ -256,6 +263,14 @@ class RoadNetworkApp:
         return True
 
     def generate(self):
+        """
+        Generate one or several routes from a fixed point on the LEFT
+        to a fixed point on the RIGHT.
+
+        Absolute rule:
+        every segment goes from column x to column x + 1.
+        A route can go up, straight, or down, but NEVER backwards.
+        """
         self.seed = random.randint(0, 99999)
         self.rng = random.Random(self.seed)
 
@@ -263,80 +278,66 @@ class RoadNetworkApp:
         self.segments = []
         self.graph = defaultdict(list)
 
-        y = self.rng.randint(2, self.rows - 3)
-        current = self.nodes[(0, y)]
-        self.start_node = current
+        start_y = self.rng.randint(2, self.rows - 3)
+        end_y = self.rng.randint(2, self.rows - 3)
 
-        used = {current}
+        self.start_node = self.nodes[(0, start_y)]
+        self.end_node = self.nodes[(self.cols - 1, end_y)]
 
-        # Main road: advances mostly to the right, with controlled meanders.
-        while current.x < self.cols - 1:
-            candidates = self.neighbours(current)
+        # Each route independently travels from left to right.
+        # Routes may cross/share nodes, creating intersections naturally.
+        for route_index in range(self.route_count):
+            current = self.start_node
 
-            def trunk_score(node):
-                east = (node.x - current.x) * 4.0
-                novelty = 2.5 if node not in used else -3.0
-                center = -abs(node.y - self.rows / 2) * 0.08
-                return east + novelty + center + self.rng.uniform(-1.2, 1.2)
+            for x in range(self.cols - 1):
+                remaining_after_move = self.cols - 2 - x
+                candidates = []
 
-            candidates.sort(key=trunk_score, reverse=True)
-            nxt = candidates[0]
+                for candidate in self.forward_neighbours(current):
+                    # Keep only moves that still make the final Y reachable.
+                    if abs(self.end_node.y - candidate.y) <= remaining_after_move:
+                        candidates.append(candidate)
 
-            self.connect(current, nxt)
-            current = nxt
-            used.add(current)
-
-        self.end_node = current
-
-        # Secondary roads.
-        for route_index in range(max(1, self.route_count - 1)):
-            starts = [
-                n for n in used
-                if 2 <= n.x <= self.cols - 4
-                and 1 <= n.y <= self.rows - 2
-            ]
-
-            if not starts:
-                break
-
-            current = self.rng.choice(starts)
-            steps = self.rng.randint(6, 13)
-
-            for _ in range(steps):
-                candidates = self.neighbours(current)
-
-                def branch_score(node):
-                    fresh = 3.0 if node not in used else -0.8
-                    vertical = (
-                        abs(node.y - current.y) * 1.2
-                        if route_index % 2 == 0
-                        else 0.0
+                if not candidates:
+                    # Defensive fallback; normally unreachable because of the
+                    # reachability rule above.
+                    target_y = max(
+                        0,
+                        min(
+                            self.rows - 1,
+                            current.y + (
+                                1 if self.end_node.y > current.y
+                                else -1 if self.end_node.y < current.y
+                                else 0
+                            ),
+                        ),
                     )
-                    east = max(0, node.x - current.x) * 0.75
-                    return fresh + vertical + east + self.rng.random()
+                    candidates = [self.nodes[(current.x + 1, target_y)]]
 
-                candidates.sort(key=branch_score, reverse=True)
-                nxt = candidates[0]
+                # Prefer randomness, with a light attraction to the end point.
+                # Different route indexes receive a small vertical personality
+                # so they do not all collapse onto the same line.
+                scored = []
+                route_bias = ((route_index % 3) - 1) * 0.16
 
-                if self.connect(current, nxt):
-                    used.add(nxt)
+                for candidate in candidates:
+                    distance_to_end = abs(self.end_node.y - candidate.y)
+                    straight_bonus = 0.20 if candidate.y == current.y else 0.0
+                    divergence = route_bias * (candidate.y - current.y)
 
+                    score = (
+                        self.rng.random()
+                        - distance_to_end * 0.07
+                        + straight_bonus
+                        + divergence
+                    )
+                    scored.append((score, candidate))
+
+                scored.sort(key=lambda item: item[0], reverse=True)
+                nxt = scored[0][1]
+
+                self.connect(current, nxt)
                 current = nxt
-
-        # Cross links create alternate routes and real intersections.
-        possible_links = []
-
-        for node in list(used):
-            for other in self.neighbours(node):
-                if other in used and not self.has_segment(node, other):
-                    possible_links.append((node, other))
-
-        self.rng.shuffle(possible_links)
-
-        for a, b in possible_links[: self.intersection_target * 2]:
-            if sum(len(self.graph[n]) >= 3 for n in self.graph) >= self.intersection_target:
-                break
-            self.connect(a, b)
 
         self.classify_nodes()
         self.compute_shortest_path()
@@ -471,20 +472,26 @@ class RoadNetworkApp:
     def make_vehicles(self):
         self.vehicles = []
 
-        connected = [n for n in self.graph if self.graph[n]]
-
-        if not connected:
+        if not self.graph[self.start_node]:
             return
 
         for _ in range(self.vehicle_count):
-            start = self.rng.choice(connected)
-            neighbour, segment = self.rng.choice(self.graph[start])
+            choices = [
+                item
+                for item in self.graph[self.start_node]
+                if item[0].x > self.start_node.x
+            ]
+
+            if not choices:
+                return
+
+            nxt, segment = self.rng.choice(choices)
 
             self.vehicles.append({
-                "from": start,
-                "to": neighbour,
+                "from": self.start_node,
+                "to": nxt,
                 "segment": segment,
-                "progress": self.rng.random(),
+                "progress": self.rng.random() * 0.8,
                 "speed": self.rng.uniform(0.006, 0.015),
             })
 
@@ -560,16 +567,28 @@ class RoadNetworkApp:
             vehicle["progress"] += vehicle["speed"] * self.traffic_speed
 
             if vehicle["progress"] >= 1.0:
-                previous = vehicle["from"]
                 current = vehicle["to"]
 
+                # Once the end is reached, restart from the left.
+                if current == self.end_node:
+                    current = self.start_node
+
                 choices = [
-                    item for item in self.graph[current]
-                    if item[0] != previous
+                    item
+                    for item in self.graph[current]
+                    if item[0].x > current.x
                 ]
 
                 if not choices:
-                    choices = self.graph[current]
+                    current = self.start_node
+                    choices = [
+                        item
+                        for item in self.graph[current]
+                        if item[0].x > current.x
+                    ]
+
+                if not choices:
+                    continue
 
                 nxt, segment = self.rng.choice(choices)
 
@@ -580,6 +599,7 @@ class RoadNetworkApp:
 
             segment = vehicle["segment"]
 
+            # Generated segments are always left -> right.
             if segment.start == vehicle["from"]:
                 t = vehicle["progress"]
             else:
@@ -644,26 +664,9 @@ class RoadNetworkApp:
         self.pause_button.label.set_text("PLAY" if self.paused else "PAUSE")
 
     def change_endpoints(self, _event):
-        connected = [
-            node for node in self.graph
-            if self.graph[node]
-        ]
-
-        if len(connected) < 2:
-            return
-
-        old_start = self.start_node
-        old_end = self.end_node
-
-        self.start_node, self.end_node = self.rng.sample(connected, 2)
-
-        if old_start:
-            old_start.type = NodeType.Connection
-        if old_end:
-            old_end.type = NodeType.Connection
-
-        self.classify_nodes()
-        self.compute_shortest_path()
+        # A new path means new LEFT and RIGHT endpoints,
+        # then a complete forward-only regeneration.
+        self.generate()
         self.redraw()
 
     def show(self):
