@@ -116,7 +116,7 @@ class RoadNetworkApp:
         self.fig.text(
             0.05,
             0.922,
-            "Procedural routing engine  /  strictly forward  /  deterministic seeds",
+            "Procedural routing engine  /  forward + vertical moves  /  deterministic seeds",
             color=C["muted"],
             fontsize=10,
         )
@@ -249,7 +249,7 @@ class RoadNetworkApp:
         self.side_ax.text(
             0.09,
             0.025,
-            "RULE  x → x + 1   •   max 2 same moves",
+            "MOVES  →  ↗  ↘  ↑  ↓   •   max 2 repeats",
             color=C["cyan"],
             fontsize=7.4,
             family="monospace",
@@ -422,144 +422,255 @@ class RoadNetworkApp:
 
     def generate_route(self, route_index):
         """
-        Create a route where:
-        - every edge is exactly x -> x + 1;
-        - the same direction (-1, 0 or +1) can be repeated at most twice;
-        - the route is guaranteed to finish exactly on END.
-        """
-        route = [self.start_node]
-        current = self.start_node
+        Generate one deterministic random route from START to END.
 
-        # None would work conceptually, but an int sentinel keeps the DP cache simple.
-        last_dy = 9
-        same_direction_count = 0
+        Allowed moves:
+            RIGHT       ( +1,  0 )
+            UP-RIGHT    ( +1, +1 )
+            DOWN-RIGHT  ( +1, -1 )
+            UP          (  0, +1 )
+            DOWN        (  0, -1 )
+
+        LEFT is impossible. A direction may never be repeated more than twice
+        consecutively. Vertical moves are grouped before the forward move of a
+        column, which keeps the search acyclic and guarantees that END is reached.
+        """
+        end_x = self.end_node.x
         end_y = self.end_node.y
 
+        delta_y = {
+            "U": 1,
+            "D": -1,
+            "R": 0,
+            "UR": 1,
+            "DR": -1,
+        }
+
+        vertical_patterns = [
+            (),
+            ("U",),
+            ("U", "U"),
+            ("D",),
+            ("D", "D"),
+        ]
+
+        forward_moves = ("R", "UR", "DR")
+
+        def next_repeat(last_direction, repeat_count, direction):
+            count = repeat_count + 1 if direction == last_direction else 1
+            if count > 2:
+                return None
+            return count
+
+        def simulate_action(x, y, last_direction, repeat_count, verticals, forward):
+            """
+            Simulate vertical moves in the current column, followed by exactly
+            one move to x + 1. Returns the generated nodes and final state.
+            """
+            local_y = y
+            local_last = last_direction
+            local_repeat = repeat_count
+            nodes = []
+            directions = []
+
+            for direction in verticals:
+                repeat = next_repeat(local_last, local_repeat, direction)
+                if repeat is None:
+                    return None
+
+                local_y += delta_y[direction]
+                if not 0 <= local_y < self.rows:
+                    return None
+
+                nodes.append(self.nodes[(x, local_y)])
+                directions.append(direction)
+                local_last = direction
+                local_repeat = repeat
+
+            repeat = next_repeat(local_last, local_repeat, forward)
+            if repeat is None:
+                return None
+
+            next_y = local_y + delta_y[forward]
+            if not 0 <= next_y < self.rows:
+                return None
+
+            next_x = x + 1
+            nodes.append(self.nodes[(next_x, next_y)])
+            directions.append(forward)
+
+            return (
+                nodes,
+                directions,
+                next_x,
+                next_y,
+                forward,
+                repeat,
+            )
+
         @lru_cache(maxsize=None)
-        def can_reach_end(y, steps_left, previous_dy, repeat_count):
+        def can_finish(x, y, last_direction, repeat_count):
             """
-            True only when END can still be reached while respecting:
-            - grid bounds;
-            - max two consecutive moves in the same direction.
+            Dynamic-programming feasibility test.
+
+            Because every action finishes with x + 1, recursion always advances
+            toward END and cannot loop, even though vertical edges are allowed.
             """
-            if steps_left == 0:
+            if x == end_x:
                 return y == end_y
 
-            for dy in (-1, 0, 1):
-                next_y = y + dy
+            for verticals in vertical_patterns:
+                for forward in forward_moves:
+                    result = simulate_action(
+                        x,
+                        y,
+                        last_direction,
+                        repeat_count,
+                        verticals,
+                        forward,
+                    )
 
-                if not 0 <= next_y < self.rows:
-                    continue
+                    if result is None:
+                        continue
 
-                next_repeat = repeat_count + 1 if dy == previous_dy else 1
-                if next_repeat > 2:
-                    continue
+                    (
+                        _nodes,
+                        _directions,
+                        next_x,
+                        next_y,
+                        next_last,
+                        next_count,
+                    ) = result
 
-                if can_reach_end(
-                    next_y,
-                    steps_left - 1,
-                    dy,
-                    next_repeat,
-                ):
-                    return True
+                    if next_x == end_x and next_y != end_y:
+                        continue
+
+                    if can_finish(
+                        next_x,
+                        next_y,
+                        next_last,
+                        next_count,
+                    ):
+                        return True
 
             return False
 
-        for next_x in range(1, self.cols):
-            steps_after_this_move = self.cols - 1 - next_x
+        route = [self.start_node]
+        current = self.start_node
+        last_direction = "START"
+        repeat_count = 0
 
-            feasible = []
+        while current.x < end_x:
+            candidates = []
 
-            for dy in (-1, 0, 1):
-                next_y = current.y + dy
+            for verticals in vertical_patterns:
+                for forward in forward_moves:
+                    result = simulate_action(
+                        current.x,
+                        current.y,
+                        last_direction,
+                        repeat_count,
+                        verticals,
+                        forward,
+                    )
 
-                if not 0 <= next_y < self.rows:
-                    continue
+                    if result is None:
+                        continue
 
-                next_repeat = (
-                    same_direction_count + 1
-                    if dy == last_dy
-                    else 1
-                )
+                    (
+                        nodes,
+                        directions,
+                        next_x,
+                        next_y,
+                        next_last,
+                        next_count,
+                    ) = result
 
-                # Hard rule: never 3 times the same direction.
-                if next_repeat > 2:
-                    continue
+                    if next_x == end_x and next_y != end_y:
+                        continue
 
-                # Hard rule: only keep moves from which END is still reachable.
-                if not can_reach_end(
-                    next_y,
-                    steps_after_this_move,
-                    dy,
-                    next_repeat,
-                ):
-                    continue
+                    if not can_finish(
+                        next_x,
+                        next_y,
+                        next_last,
+                        next_count,
+                    ):
+                        continue
 
-                candidate = self.nodes[(next_x, next_y)]
-                feasible.append((dy, next_y, next_repeat, candidate))
+                    # The last edge is always the forward/diagonal edge.
+                    forward_from = (
+                        current if len(nodes) == 1 else nodes[-2]
+                    )
+                    forward_to = nodes[-1]
 
-            if not feasible:
+                    crossing_penalty = (
+                        1.10
+                        if self.edge_would_cross(forward_from, forward_to)
+                        else 0.0
+                    )
+
+                    reuse_penalty = (
+                        sum(self.node_usage.get(node, 0) for node in nodes)
+                        * 0.34
+                    )
+
+                    # Encourage visible vertical roads without making every
+                    # column vertical. One vertical move is common; two are rarer.
+                    vertical_count = len(verticals)
+                    vertical_bonus = 0.24 if vertical_count == 1 else 0.08 if vertical_count == 2 else 0.0
+
+                    target_pull = abs(end_y - next_y) * 0.025
+
+                    lane = (
+                        route_index - (self.route_count - 1) / 2
+                    ) * 0.030
+                    lane_bonus = lane * (next_y - self.rows / 2)
+
+                    # Prefer changing direction after two repeated moves and keep
+                    # the geometry varied but readable.
+                    turn_bonus = (
+                        0.10
+                        if directions[0] != last_direction
+                        else 0.0
+                    )
+
+                    score = (
+                        self.rng.random()
+                        + vertical_bonus
+                        + lane_bonus
+                        + turn_bonus
+                        - reuse_penalty
+                        - crossing_penalty
+                        - target_pull
+                    )
+
+                    candidates.append(
+                        (
+                            score,
+                            nodes,
+                            directions,
+                            next_last,
+                            next_count,
+                        )
+                    )
+
+            if not candidates:
                 raise RuntimeError(
-                    "No valid forward route can reach END with the current constraints."
+                    "No valid route can reach END with the current movement rules."
                 )
 
-            # Crossing avoidance is visual only. If avoiding a crossing would make
-            # the route impossible, keep the valid route rather than breaking
-            # the two-directions rule or missing END.
-            clean = [
-                item
-                for item in feasible
-                if not self.edge_would_cross(current, item[3])
-            ]
-            choices = clean if clean else feasible
+            candidates.sort(key=lambda item: item[0], reverse=True)
+            (
+                _score,
+                chosen_nodes,
+                chosen_directions,
+                last_direction,
+                repeat_count,
+            ) = candidates[0]
 
-            scored = []
+            route.extend(chosen_nodes)
+            current = chosen_nodes[-1]
 
-            for dy, next_y, next_repeat, candidate in choices:
-                reuse_penalty = self.node_usage.get(candidate, 0) * 0.50
-                reversal_penalty = (
-                    0.85
-                    if last_dy in (-1, 1) and dy == -last_dy
-                    else 0.0
-                )
-                momentum_bonus = 0.18 if dy == last_dy else 0.0
-                straight_bonus = 0.06 if dy == 0 else 0.0
-                target_pull = abs(end_y - next_y) * 0.035
-
-                lane = (
-                    route_index - (self.route_count - 1) / 2
-                ) * 0.035
-                lane_bonus = lane * (next_y - self.rows / 2)
-
-                # When a direction has already been used twice, it is already
-                # excluded above. After one repetition, slightly prefer changing
-                # direction so routes look less mechanical.
-                repeat_penalty = 0.12 if next_repeat == 2 else 0.0
-
-                score = (
-                    self.rng.random()
-                    + momentum_bonus
-                    + straight_bonus
-                    + lane_bonus
-                    - reuse_penalty
-                    - reversal_penalty
-                    - target_pull
-                    - repeat_penalty
-                )
-
-                scored.append(
-                    (score, dy, next_y, next_repeat, candidate)
-                )
-
-            scored.sort(key=lambda item: item[0], reverse=True)
-            _, chosen_dy, _next_y, chosen_repeat, chosen_node = scored[0]
-
-            current = chosen_node
-            route.append(current)
-            last_dy = chosen_dy
-            same_direction_count = chosen_repeat
-
-        # Defensive assertion: generation must end exactly on END.
         if current != self.end_node:
             raise RuntimeError("Generated route did not finish on END.")
 
@@ -799,33 +910,60 @@ class RoadNetworkApp:
     # ------------------------------------------------------------------
 
     def make_vehicles(self):
+        """
+        Vehicles follow complete generated routes instead of choosing arbitrary
+        graph edges. This guarantees that vertical junctions can never trap a
+        vehicle in a loop and every vehicle eventually reaches END.
+        """
         self.vehicles = []
-        first_edges = self.forward_graph[self.start_node]
 
-        if not first_edges:
+        valid_routes = [
+            route for route in self.routes
+            if len(route) >= 2
+        ]
+
+        if not valid_routes:
             return
 
         for index in range(self.vehicle_count):
-            next_node, segment = self.rng.choice(first_edges)
+            route_index = index % len(valid_routes)
+            route = valid_routes[route_index]
+            edge_count = len(route) - 1
+
+            # Spread particles across the already-built network.
+            edge_index = int(
+                (index / max(self.vehicle_count, 1)) * edge_count
+            )
+            edge_index = min(edge_index, edge_count - 1)
+
+            a = route[edge_index]
+            b = route[edge_index + 1]
+            segment = self.segment_by_key[(a.id, b.id)]
+
             self.vehicles.append(
                 {
-                    "from": self.start_node,
-                    "to": next_node,
+                    "route_index": route_index,
+                    "edge_index": edge_index,
                     "segment": segment,
-                    "progress": (index / max(self.vehicle_count, 1)) * 0.9,
-                    "speed": self.rng.uniform(0.010, 0.017),
+                    "progress": 0.0,
+                    "speed": self.rng.uniform(0.015, 0.026),
                 }
             )
 
     def restart_vehicle(self, vehicle):
-        choices = self.forward_graph[self.start_node]
-        if not choices:
+        if not self.routes:
             return False
 
-        next_node, segment = self.rng.choice(choices)
-        vehicle["from"] = self.start_node
-        vehicle["to"] = next_node
-        vehicle["segment"] = segment
+        vehicle["route_index"] = self.rng.randrange(len(self.routes))
+        route = self.routes[vehicle["route_index"]]
+
+        if len(route) < 2:
+            return False
+
+        vehicle["edge_index"] = 0
+        a = route[0]
+        b = route[1]
+        vehicle["segment"] = self.segment_by_key[(a.id, b.id)]
         vehicle["progress"] = 0.0
         return True
 
@@ -838,30 +976,40 @@ class RoadNetworkApp:
         positions = []
 
         for vehicle in self.vehicles:
-            vehicle["progress"] += vehicle["speed"] * self.traffic_speed
+            remaining_distance = vehicle["speed"] * self.traffic_speed
 
-            while vehicle["progress"] >= 1.0:
-                overflow = vehicle["progress"] - 1.0
-                current = vehicle["to"]
+            while remaining_distance > 0:
+                segment = vehicle["segment"]
+                segment_remaining = (
+                    1.0 - vehicle["progress"]
+                ) * max(segment.length, 1e-9)
 
-                if current == self.end_node:
+                if remaining_distance < segment_remaining:
+                    vehicle["progress"] += (
+                        remaining_distance / max(segment.length, 1e-9)
+                    )
+                    remaining_distance = 0.0
+                    break
+
+                remaining_distance -= segment_remaining
+
+                route = self.routes[vehicle["route_index"]]
+                vehicle["edge_index"] += 1
+
+                if vehicle["edge_index"] >= len(route) - 1:
                     if not self.restart_vehicle(vehicle):
+                        remaining_distance = 0.0
                         break
-                else:
-                    choices = self.forward_graph[current]
-                    if not choices:
-                        if not self.restart_vehicle(vehicle):
-                            break
-                    else:
-                        next_node, segment = self.rng.choice(choices)
-                        vehicle["from"] = current
-                        vehicle["to"] = next_node
-                        vehicle["segment"] = segment
-                        vehicle["progress"] = 0.0
+                    continue
 
-                vehicle["progress"] += overflow
+                a = route[vehicle["edge_index"]]
+                b = route[vehicle["edge_index"] + 1]
+                vehicle["segment"] = self.segment_by_key[(a.id, b.id)]
+                vehicle["progress"] = 0.0
 
-            positions.append(vehicle["segment"].point_at(vehicle["progress"]))
+            positions.append(
+                vehicle["segment"].point_at(vehicle["progress"])
+            )
 
         offsets = positions if positions else np.empty((0, 2))
         self.vehicle_glow_scatter.set_offsets(offsets)
