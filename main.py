@@ -770,7 +770,6 @@ class RoadNetworkApp:
         self.ax.set_aspect("equal")
         self.ax.axis("off")
 
-        # Subtle horizontal guides give the map depth without visual noise.
         for y in range(self.rows):
             self.ax.plot(
                 [-0.2, self.cols - 0.8],
@@ -783,127 +782,327 @@ class RoadNetworkApp:
 
         xs = [node.x for node in self.nodes.values()]
         ys = [node.y for node in self.nodes.values()]
-        self.ax.scatter(xs, ys, s=9, color=C["grid_bright"], alpha=0.52, zorder=1)
+        self.ax.scatter(
+            xs, ys,
+            s=9,
+            color=C["grid_bright"],
+            alpha=0.52,
+            zorder=1,
+        )
 
         self.road_glow = LineCollection(
-            [], colors=C["cyan"], linewidths=8.0, alpha=0.075, zorder=2
+            [],
+            colors=C["cyan"],
+            linewidths=8.0,
+            alpha=0.07,
+            zorder=2,
         )
         self.road_lines = LineCollection(
-            [], colors=C["road"], linewidths=2.15, alpha=0.92, zorder=3
+            [],
+            colors=C["road"],
+            linewidths=2.15,
+            alpha=0.94,
+            zorder=3,
         )
         self.path_glow = LineCollection(
-            [], colors=C["cyan"], linewidths=4.5, alpha=0.92, zorder=4
+            [],
+            colors=C["cyan"],
+            linewidths=4.4,
+            alpha=0.90,
+            zorder=4,
         )
-
         self.ax.add_collection(self.road_glow)
         self.ax.add_collection(self.road_lines)
         self.ax.add_collection(self.path_glow)
 
         self.start_marker = self.ax.scatter(
-            [self.start_node.x], [self.start_node.y],
-            s=105, color=C["green"], edgecolors=C["white"], linewidths=1.0, zorder=10
+            [self.start_node.x],
+            [self.start_node.y],
+            s=105,
+            color=C["green"],
+            edgecolors=C["white"],
+            linewidths=1.0,
+            zorder=10,
         )
         self.end_marker = self.ax.scatter(
-            [self.end_node.x], [self.end_node.y],
-            s=105, color=C["red"], edgecolors=C["white"], linewidths=1.0, zorder=10
+            [self.end_node.x],
+            [self.end_node.y],
+            s=105,
+            color=C["red"],
+            edgecolors=C["white"],
+            linewidths=1.0,
+            zorder=10,
         )
         self.start_ring = self.ax.scatter(
-            [self.start_node.x], [self.start_node.y],
-            s=220, facecolors="none", edgecolors=C["green"], linewidths=1.1,
-            alpha=0.25, zorder=9
+            [self.start_node.x],
+            [self.start_node.y],
+            s=220,
+            facecolors="none",
+            edgecolors=C["green"],
+            linewidths=1.1,
+            alpha=0.25,
+            zorder=9,
         )
         self.end_ring = self.ax.scatter(
-            [self.end_node.x], [self.end_node.y],
-            s=220, facecolors="none", edgecolors=C["red"], linewidths=1.1,
-            alpha=0.25, zorder=9
+            [self.end_node.x],
+            [self.end_node.y],
+            s=220,
+            facecolors="none",
+            edgecolors=C["red"],
+            linewidths=1.1,
+            alpha=0.25,
+            zorder=9,
         )
 
         self.ax.text(
-            self.start_node.x + 0.25, self.start_node.y + 0.35, "START",
-            color=C["green"], fontsize=7.5, fontweight="bold", zorder=11
+            self.start_node.x + 0.25,
+            self.start_node.y + 0.35,
+            "START",
+            color=C["green"],
+            fontsize=7.5,
+            fontweight="bold",
+            zorder=11,
         )
         self.ax.text(
-            self.end_node.x - 0.25, self.end_node.y + 0.35, "END",
-            color=C["red"], fontsize=7.5, fontweight="bold", ha="right", zorder=11
+            self.end_node.x - 0.25,
+            self.end_node.y + 0.35,
+            "END",
+            color=C["red"],
+            fontsize=7.5,
+            fontweight="bold",
+            ha="right",
+            zorder=11,
         )
 
         self.intersection_scatter = self.ax.scatter(
-            [], [], s=58, color=C["orange"], edgecolors=C["bg"], linewidths=1.2, zorder=8
+            [], [],
+            s=58,
+            color=C["orange"],
+            edgecolors=C["bg"],
+            linewidths=1.2,
+            zorder=8,
         )
         self.connection_scatter = self.ax.scatter(
-            [], [], s=17, color=C["road"], edgecolors=C["bg"], linewidths=0.7, zorder=7
+            [], [],
+            s=17,
+            color=C["road"],
+            edgecolors=C["bg"],
+            linewidths=0.7,
+            zorder=7,
         )
-        self.build_head_scatter = self.ax.scatter(
-            [], [], s=35, color=C["cyan"], edgecolors=C["white"], linewidths=0.6, zorder=11
+        self.builder_glow = self.ax.scatter(
+            [], [],
+            s=170,
+            color=C["cyan"],
+            alpha=0.12,
+            edgecolors="none",
+            zorder=11,
         )
-        self.vehicle_glow_scatter = self.ax.scatter(
-            [], [], s=150, color=C["cyan"], alpha=0.12, edgecolors="none", zorder=11
-        )
-        self.vehicle_scatter = self.ax.scatter(
-            [], [], s=42, color=C["white"], edgecolors=C["cyan"], linewidths=1.5, zorder=12
+        self.builder_scatter = self.ax.scatter(
+            [], [],
+            s=46,
+            color=C["cyan"],
+            edgecolors=C["white"],
+            linewidths=0.8,
+            zorder=12,
         )
 
-        self.build_position = 0.0
-        self.build_finished = False
-        self.last_revealed_column = -1
+        self.vehicle_out_glow = self.ax.scatter(
+            [], [],
+            s=145,
+            color=C["cyan"],
+            alpha=0.12,
+            edgecolors="none",
+            zorder=11,
+        )
+        self.vehicle_out = self.ax.scatter(
+            [], [],
+            s=40,
+            color=C["cyan"],
+            edgecolors=C["white"],
+            linewidths=0.7,
+            zorder=12,
+        )
+        self.vehicle_back_glow = self.ax.scatter(
+            [], [],
+            s=145,
+            color=C["purple"],
+            alpha=0.12,
+            edgecolors="none",
+            zorder=11,
+        )
+        self.vehicle_back = self.ax.scatter(
+            [], [],
+            s=40,
+            color=C["purple"],
+            edgecolors=C["white"],
+            linewidths=0.7,
+            zorder=12,
+        )
+
+        self.reset_build_state()
         self.make_vehicles()
-
+        self.update_builder_color()
         self.update_build_drawing()
         self.update_status_text()
         self.fig.canvas.draw_idle()
 
-    def update_build_drawing(self):
-        roads = []
-        shortest = []
-        heads = []
+    def reset_build_state(self):
+        self.built_segment_keys = set()
+        self.build_route_index = 0
+        self.build_edge_index = 0
+        self.build_edge_progress = 0.0
+        self.build_finished = len(self.routes) == 0
+        self.completed_build_edges = 0
 
-        for segment in self.segments:
-            key = (segment.start.id, segment.end.id)
-            stage = self.segment_build_stage.get(key, 0)
-            progress = max(
-                0.0,
-                min(1.0, self.build_position - stage),
-            )
-
-            if progress <= 0.0:
-                continue
-
-            x, y = segment.point_at(progress)
-            line = [
-                (segment.start.x, segment.start.y),
-                (x, y),
-            ]
-            roads.append(line)
-
-            if key in self.shortest_path_keys:
-                shortest.append(line)
-
-            if 0.0 < progress < 1.0:
-                heads.append((x, y))
-
-        self.road_glow.set_segments(roads)
-        self.road_lines.set_segments(roads)
-        self.path_glow.set_segments(shortest)
-
-        self.build_head_scatter.set_offsets(
-            heads if heads else np.empty((0, 2))
+    @staticmethod
+    def interpolate_nodes(a, b, t):
+        t = max(0.0, min(1.0, float(t)))
+        return (
+            a.x + (b.x - a.x) * t,
+            a.y + (b.y - a.y) * t,
         )
 
-        reveal_stage = int(self.build_position + 0.02)
-        if reveal_stage != self.last_revealed_column:
-            self.last_revealed_column = reveal_stage
-            self.update_visible_nodes(reveal_stage)
+    def current_build_edge(self):
+        if (
+            self.build_finished
+            or self.build_route_index >= len(self.routes)
+        ):
+            return None
 
-    def update_visible_nodes(self, reveal_stage):
-        visible_nodes = {self.start_node, self.end_node}
+        route = self.routes[self.build_route_index]
+        if self.build_edge_index >= len(route) - 1:
+            return None
+
+        return (
+            route[self.build_edge_index],
+            route[self.build_edge_index + 1],
+        )
+
+    def advance_build(self):
+        edge = self.current_build_edge()
+        if edge is None:
+            self.finish_or_advance_route()
+            return
+
+        a, b = edge
+        distance = max(
+            np.hypot(b.x - a.x, b.y - a.y),
+            1e-9,
+        )
+        self.build_edge_progress += (
+            0.085 * self.build_speed
+        ) / distance
+
+        if self.build_edge_progress >= 1.0:
+            self.built_segment_keys.add(
+                self.segment_key(a, b)
+            )
+            self.completed_build_edges += 1
+            self.build_edge_progress = 0.0
+            self.build_edge_index += 1
+
+            route = self.routes[self.build_route_index]
+            if self.build_edge_index >= len(route) - 1:
+                self.finish_or_advance_route()
+
+    def finish_or_advance_route(self):
+        if self.build_route_index + 1 >= len(self.routes):
+            self.build_finished = True
+            self.builder_scatter.set_offsets(
+                np.empty((0, 2))
+            )
+            self.builder_glow.set_offsets(
+                np.empty((0, 2))
+            )
+            return
+
+        self.build_route_index += 1
+        self.build_edge_index = 0
+        self.build_edge_progress = 0.0
+        self.update_builder_color()
+
+    def update_builder_color(self):
+        if self.build_route_index >= len(self.routes):
+            return
+
+        route = self.routes[self.build_route_index]
+        color = (
+            C["cyan"]
+            if route[0] == self.start_node
+            else C["purple"]
+        )
+        self.builder_scatter.set_facecolor(color)
+        self.builder_glow.set_facecolor(color)
+
+    def update_build_drawing(self):
+        full_roads = []
+        shortest = []
 
         for segment in self.segments:
-            key = (segment.start.id, segment.end.id)
-            stage = self.segment_build_stage.get(key, 0)
+            if segment.key not in self.built_segment_keys:
+                continue
 
-            if stage <= reveal_stage:
+            line = [
+                (segment.start.x, segment.start.y),
+                (segment.end.x, segment.end.y),
+            ]
+            full_roads.append(line)
+
+            if segment.key in self.shortest_path_keys:
+                shortest.append(line)
+
+        active_edge = self.current_build_edge()
+        if active_edge is not None:
+            a, b = active_edge
+            current = self.interpolate_nodes(
+                a,
+                b,
+                self.build_edge_progress,
+            )
+            active_key = self.segment_key(a, b)
+
+            if active_key not in self.built_segment_keys:
+                full_roads.append([
+                    (a.x, a.y),
+                    current,
+                ])
+                if active_key in self.shortest_path_keys:
+                    shortest.append([
+                        (a.x, a.y),
+                        current,
+                    ])
+
+            offsets = np.array([current])
+            self.builder_scatter.set_offsets(offsets)
+            self.builder_glow.set_offsets(offsets)
+        else:
+            self.builder_scatter.set_offsets(
+                np.empty((0, 2))
+            )
+            self.builder_glow.set_offsets(
+                np.empty((0, 2))
+            )
+
+        self.road_glow.set_segments(full_roads)
+        self.road_lines.set_segments(full_roads)
+        self.path_glow.set_segments(shortest)
+        self.update_visible_nodes()
+
+    def update_visible_nodes(self):
+        visible_nodes = {
+            self.start_node,
+            self.end_node,
+        }
+
+        for segment in self.segments:
+            if segment.key in self.built_segment_keys:
                 visible_nodes.add(segment.start)
                 visible_nodes.add(segment.end)
+
+        active = self.current_build_edge()
+        if active is not None:
+            visible_nodes.add(active[0])
 
         junctions = []
         connections = []
@@ -915,10 +1114,14 @@ class RoadNetworkApp:
                 connections.append((node.x, node.y))
 
         self.intersection_scatter.set_offsets(
-            junctions if junctions else np.empty((0, 2))
+            junctions
+            if junctions
+            else np.empty((0, 2))
         )
         self.connection_scatter.set_offsets(
-            connections if connections else np.empty((0, 2))
+            connections
+            if connections
+            else np.empty((0, 2))
         )
 
     # ------------------------------------------------------------------
