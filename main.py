@@ -360,9 +360,13 @@ class RoadNetworkApp:
                 node_id = y * self.cols + x
                 self.nodes[(x, y)] = Node(node_id, x, y)
 
+    @staticmethod
+    def segment_key(a, b):
+        return tuple(sorted((a.id, b.id)))
+
     def generate_network(self, seed=None, new_endpoints=True):
-        previous_start_y = self.start_node.y if self.start_node is not None else None
-        previous_end_y = self.end_node.y if self.end_node is not None else None
+        old_start_y = self.start_node.y if self.start_node is not None else None
+        old_end_y = self.end_node.y if self.end_node is not None else None
 
         if seed is not None:
             self.seed = int(seed) % (MAX_SEED + 1)
@@ -373,110 +377,103 @@ class RoadNetworkApp:
         self.routes = []
         self.segments = []
         self.segment_by_key = {}
-        self.forward_graph = defaultdict(list)
+        self.graph = defaultdict(list)
         self.node_usage = defaultdict(int)
-        self.segment_build_stage = {}
         self.route_lengths = []
+        self.shortest_path_keys = set()
         self.shortest_distance = 0.0
-        self.max_build_stage = 1
 
-        if new_endpoints or previous_start_y is None or previous_end_y is None:
+        if (
+            new_endpoints
+            or old_start_y is None
+            or old_end_y is None
+            or not 0 <= old_start_y < self.rows
+            or not 0 <= old_end_y < self.rows
+        ):
             start_y = self.rng.randint(2, self.rows - 3)
             end_y = self.rng.randint(2, self.rows - 3)
         else:
-            start_y = previous_start_y
-            end_y = previous_end_y
+            start_y = old_start_y
+            end_y = old_end_y
 
         self.start_node = self.nodes[(0, start_y)]
         self.end_node = self.nodes[(self.cols - 1, end_y)]
 
         for route_index in range(self.route_count):
-            route = self.generate_route(route_index)
+            if route_index % 2 == 0:
+                source = self.start_node
+                target = self.end_node
+            else:
+                source = self.end_node
+                target = self.start_node
+
+            route = self.generate_route(route_index, source, target)
             self.routes.append(route)
 
             for node in route:
                 self.node_usage[node] += 1
 
             route_length = 0.0
-
-            for step_index, (a, b) in enumerate(zip(route, route[1:])):
+            for a, b in zip(route, route[1:]):
                 segment = self.register_segment(a, b)
                 route_length += segment.length
 
-                key = (segment.start.id, segment.end.id)
-                old_stage = self.segment_build_stage.get(key)
-                if old_stage is None or step_index < old_stage:
-                    self.segment_build_stage[key] = step_index
-
             self.route_lengths.append(route_length)
 
-        self.max_build_stage = max(
-            self.segment_build_stage.values(),
-            default=0,
-        ) + 1
+        self.total_build_edges = max(
+            1,
+            sum(max(0, len(route) - 1) for route in self.routes),
+        )
 
         self.classify_nodes()
         self.compute_shortest_path()
 
-    def generate_route(self, route_index):
+    def generate_route(self, route_index, source, target):
         """
-        Generate a connected route from START to END.
-
-        Horizontal/diagonal moves remain dominant. Pure vertical moves are
-        deliberately rare and only exist as short detours. LEFT is impossible
-        and no direction can be repeated more than twice in a row.
+        Generate a route from source to target. Horizontal progress always moves
+        toward the target, while rare vertical detours are allowed. No turn has
+        an interior angle below 90°, and no direction repeats more than twice.
         """
-        end_x = self.end_node.x
-        end_y = self.end_node.y
+        direction_sign = 1 if target.x > source.x else -1
+        target_x = target.x
+        target_y = target.y
 
         delta_y = {
             "U": 1,
             "D": -1,
-            "R": 0,
-            "UR": 1,
-            "DR": -1,
+            "F": 0,
+            "FU": 1,
+            "FD": -1,
         }
-
-        direction_vectors = {
+        vectors = {
             "U": (0, 1),
             "D": (0, -1),
-            "R": (1, 0),
-            "UR": (1, 1),
-            "DR": (1, -1),
+            "F": (direction_sign, 0),
+            "FU": (direction_sign, 1),
+            "FD": (direction_sign, -1),
         }
 
         def angle_is_valid(previous_direction, next_direction):
-            """
-            Reject any geometric corner below 90 degrees.
-
-            For two consecutive movement vectors a and b, the interior angle
-            of the polyline is >= 90° exactly when a·b >= 0.
-            """
             if previous_direction == "START":
                 return True
-
-            ax, ay = direction_vectors[previous_direction]
-            bx, by = direction_vectors[next_direction]
+            ax, ay = vectors[previous_direction]
+            bx, by = vectors[next_direction]
             return ax * bx + ay * by >= 0
 
-        # Route 0 tends to be efficient. Later routes progressively accept
-        # slightly more detours, producing genuinely different total distances.
         if self.route_count <= 1:
             detour_profile = 0.0
         else:
             detour_profile = route_index / (self.route_count - 1)
 
-        vertical_chance = 0.01 + 0.06 * detour_profile
-
+        vertical_chance = 0.008 + 0.035 * detour_profile
         vertical_patterns = [
             ((), 1.0 - vertical_chance),
-            (("U",), vertical_chance * 0.47),
-            (("D",), vertical_chance * 0.47),
-            (("U", "U"), vertical_chance * 0.03),
-            (("D", "D"), vertical_chance * 0.03),
+            (("U",), vertical_chance * 0.485),
+            (("D",), vertical_chance * 0.485),
+            (("U", "U"), vertical_chance * 0.015),
+            (("D", "D"), vertical_chance * 0.015),
         ]
-
-        forward_moves = ("R", "UR", "DR")
+        forward_moves = ("F", "FU", "FD")
 
         def next_repeat(last_direction, repeat_count, direction):
             count = repeat_count + 1 if direction == last_direction else 1
@@ -519,66 +516,40 @@ class RoadNetworkApp:
             if not 0 <= next_y < self.rows:
                 return None
 
-            next_x = x + 1
+            next_x = x + direction_sign
             nodes.append(self.nodes[(next_x, next_y)])
             directions.append(forward)
 
-            return (
-                nodes,
-                directions,
-                next_x,
-                next_y,
-                forward,
-                repeat,
-            )
+            return nodes, directions, next_x, next_y, forward, repeat
 
         @lru_cache(maxsize=None)
         def can_finish(x, y, last_direction, repeat_count):
-            if x == end_x:
-                return y == end_y
+            if x == target_x:
+                return y == target_y
 
             for verticals, _pattern_weight in vertical_patterns:
                 for forward in forward_moves:
                     result = simulate_action(
-                        x,
-                        y,
-                        last_direction,
-                        repeat_count,
-                        verticals,
-                        forward,
+                        x, y, last_direction, repeat_count,
+                        verticals, forward,
                     )
-
                     if result is None:
                         continue
 
-                    (
-                        _nodes,
-                        _directions,
-                        next_x,
-                        next_y,
-                        next_last,
-                        next_count,
-                    ) = result
-
-                    if next_x == end_x and next_y != end_y:
+                    _nodes, _directions, nx, ny, nl, nc = result
+                    if nx == target_x and ny != target_y:
                         continue
-
-                    if can_finish(
-                        next_x,
-                        next_y,
-                        next_last,
-                        next_count,
-                    ):
+                    if can_finish(nx, ny, nl, nc):
                         return True
 
             return False
 
-        route = [self.start_node]
-        current = self.start_node
+        route = [source]
+        current = source
         last_direction = "START"
         repeat_count = 0
 
-        while current.x < end_x:
+        while current.x != target_x:
             candidates = []
             weights = []
 
@@ -592,83 +563,56 @@ class RoadNetworkApp:
                         verticals,
                         forward,
                     )
-
                     if result is None:
                         continue
 
-                    (
-                        nodes,
-                        directions,
-                        next_x,
-                        next_y,
-                        next_last,
-                        next_count,
-                    ) = result
-
-                    if next_x == end_x and next_y != end_y:
+                    nodes, directions, nx, ny, nl, nc = result
+                    if nx == target_x and ny != target_y:
                         continue
-
-                    if not can_finish(
-                        next_x,
-                        next_y,
-                        next_last,
-                        next_count,
-                    ):
+                    if not can_finish(nx, ny, nl, nc):
                         continue
 
                     forward_from = current if len(nodes) == 1 else nodes[-2]
                     forward_to = nodes[-1]
-
                     crossing = self.edge_would_cross(
                         forward_from,
                         forward_to,
                     )
 
-                    before_distance = abs(end_y - current.y)
-                    after_distance = abs(end_y - next_y)
+                    before_distance = abs(target_y - current.y)
+                    after_distance = abs(target_y - ny)
                     improvement = before_distance - after_distance
 
-                    if forward == "R":
-                        forward_weight = 1.45
+                    if forward == "F":
+                        forward_weight = 1.50
                     elif improvement > 0:
                         forward_weight = 1.75
                     elif improvement == 0:
-                        forward_weight = 1.0
+                        forward_weight = 1.00
                     else:
-                        # Detour-oriented routes can wander a little more.
                         forward_weight = 0.35 + 0.55 * detour_profile
 
                     reuse = sum(
                         self.node_usage.get(node, 0)
                         for node in nodes
                     )
-
                     weight = pattern_weight * forward_weight
-                    weight /= 1.0 + reuse * 0.55
+                    weight /= 1.0 + reuse * 0.50
 
                     if crossing:
+                        weight *= 0.08
+                    if route_index == 0 and verticals:
                         weight *= 0.10
 
-                    # Keep the efficient route especially clean.
-                    if route_index == 0 and verticals:
-                        weight *= 0.12
-
-                    candidates.append(
-                        (
-                            nodes,
-                            directions,
-                            next_last,
-                            next_count,
-                        )
-                    )
-                    weights.append(max(weight, 1e-8))
+                    candidates.append((nodes, directions, nl, nc))
+                    weights.append(max(weight, 1e-9))
 
             if not candidates:
                 raise RuntimeError(
-                    "No valid route can reach END with the current movement rules."
+                    "No valid route can reach the requested endpoint."
                 )
 
-            chosen_index = self.rng.choices(
+            selected = self.rng.choices(
                 range(len(candidates)),
                 weights=weights,
                 k=1,
@@ -679,17 +623,21 @@ class RoadNetworkApp:
                 _chosen_directions,
                 last_direction,
                 repeat_count,
-            ) = candidates[chosen_index]
+            ) = candidates[selected]
 
             route.extend(chosen_nodes)
             current = chosen_nodes[-1]
 
-        if current != self.end_node:
-            raise RuntimeError("Generated route did not finish on END.")
+        if current != target:
+            raise RuntimeError(
+                "Generated route did not finish on its target endpoint."
+            )
 
-        # Defensive check: every actual bend in the produced polyline must
-        # have an interior angle of at least 90 degrees.
-        for previous, center, following in zip(route, route[1:], route[2:]):
+        for previous, center, following in zip(
+            route,
+            route[1:],
+            route[2:],
+        ):
             incoming = (
                 center.x - previous.x,
                 center.y - previous.y,
@@ -698,7 +646,6 @@ class RoadNetworkApp:
                 following.x - center.x,
                 following.y - center.y,
             )
-
             if incoming[0] * outgoing[0] + incoming[1] * outgoing[1] < 0:
                 raise RuntimeError(
                     "Generated route contains an angle below 90 degrees."
@@ -707,42 +654,57 @@ class RoadNetworkApp:
         return route
 
     def edge_would_cross(self, a, b):
-        """Reject diagonal X-crossings that do not meet on a grid node."""
+        """Reject X-shaped diagonal crossings between the same two columns."""
+        if a.x == b.x:
+            return False
+
+        low_x = min(a.x, b.x)
+        high_x = max(a.x, b.x)
+        a_low = a if a.x == low_x else b
+        a_high = b if b.x == high_x else a
+
         for segment in self.segments:
-            if segment.start.x != a.x:
+            if segment.start.x == segment.end.x:
                 continue
 
-            d0 = a.y - segment.start.y
-            d1 = b.y - segment.end.y
+            seg_low_x = min(segment.start.x, segment.end.x)
+            seg_high_x = max(segment.start.x, segment.end.x)
+            if seg_low_x != low_x or seg_high_x != high_x:
+                continue
 
+            s_low = (
+                segment.start
+                if segment.start.x == low_x
+                else segment.end
+            )
+            s_high = (
+                segment.end
+                if segment.end.x == high_x
+                else segment.start
+            )
+
+            d0 = a_low.y - s_low.y
+            d1 = a_high.y - s_high.y
             if d0 * d1 < 0:
                 return True
 
         return False
 
     def register_segment(self, a, b):
-        key = (a.id, b.id)
+        key = self.segment_key(a, b)
+        if key in self.segment_by_key:
+            return self.segment_by_key[key]
 
-        if key not in self.segment_by_key:
-            segment = Segment(a, b)
-            self.segment_by_key[key] = segment
-            self.segments.append(segment)
-            self.forward_graph[a].append((b, segment))
-            return segment
-
-        return self.segment_by_key[key]
+        segment = Segment(a, b)
+        self.segment_by_key[key] = segment
+        self.segments.append(segment)
+        self.graph[a].append((b, segment))
+        self.graph[b].append((a, segment))
+        return segment
 
     def classify_nodes(self):
-        incoming = defaultdict(int)
-        outgoing = defaultdict(int)
-
-        for a, edges in self.forward_graph.items():
-            outgoing[a] += len(edges)
-            for b, _segment in edges:
-                incoming[b] += 1
-
         for node in self.nodes.values():
-            degree = incoming[node] + outgoing[node]
+            degree = len(self.graph[node])
 
             if node == self.start_node:
                 node.type = NodeType.Start
@@ -757,7 +719,6 @@ class RoadNetworkApp:
 
     def compute_shortest_path(self):
         self.shortest_path_keys = set()
-
         distances = {self.start_node: 0.0}
         previous = {}
         queue = [(0.0, self.start_node.id, self.start_node)]
@@ -767,17 +728,22 @@ class RoadNetworkApp:
 
             if distance != distances.get(node):
                 continue
-
             if node == self.end_node:
                 break
 
-            for neighbour, segment in self.forward_graph[node]:
+            for neighbour, segment in self.graph[node]:
                 candidate = distance + segment.length
 
-                if candidate < distances.get(neighbour, float("inf")):
+                if candidate < distances.get(
+                    neighbour,
+                    float("inf"),
+                ):
                     distances[neighbour] = candidate
                     previous[neighbour] = (node, segment)
-                    heapq.heappush(queue, (candidate, neighbour.id, neighbour))
+                    heapq.heappush(
+                        queue,
+                        (candidate, neighbour.id, neighbour),
+                    )
 
         self.shortest_distance = distances.get(
             self.end_node,
@@ -787,7 +753,9 @@ class RoadNetworkApp:
         node = self.end_node
         while node in previous:
             parent, segment = previous[node]
-            self.shortest_path_keys.add((segment.start.id, segment.end.id))
+            self.shortest_path_keys.add(
+                self.segment_key(segment.start, segment.end)
+            )
             node = parent
 
     # ------------------------------------------------------------------
