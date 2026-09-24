@@ -5,7 +5,8 @@ from collections import defaultdict
 import matplotlib.pyplot as plt
 import numpy as np
 from matplotlib.animation import FuncAnimation
-from matplotlib.widgets import Button, Slider
+from matplotlib.collections import LineCollection
+from matplotlib.widgets import Button, Slider, TextBox
 
 from node import Node, NodeType
 from segment import Segment
@@ -13,20 +14,22 @@ from segment import Segment
 
 GRID_SIZE = (24, 12)
 FPS = 60
+MAX_SEED = 999_999_999
 
 C = {
-    "bg": "#071018",
-    "panel": "#0E1A26",
-    "panel_2": "#122333",
-    "grid": "#1D3445",
-    "road": "#BFD0DC",
-    "road_dim": "#6F8495",
-    "cyan": "#31D6FF",
-    "cyan_soft": "#1FA7CA",
-    "green": "#36E6A0",
-    "red": "#FF6179",
-    "orange": "#FFB648",
-    "white": "#F1F7FB",
+    "bg": "#061019",
+    "panel": "#0B1823",
+    "panel_2": "#102536",
+    "border": "#17384B",
+    "grid": "#173044",
+    "grid_bright": "#24495F",
+    "road": "#C8D7E2",
+    "cyan": "#28D7FF",
+    "cyan_2": "#00AEEB",
+    "green": "#31E6A1",
+    "red": "#FF6078",
+    "orange": "#FFB84A",
+    "white": "#F4F8FB",
     "muted": "#7890A3",
 }
 
@@ -41,7 +44,7 @@ class RoadNetworkApp:
         self.traffic_speed = 1.0
 
         self.paused = False
-        self.seed = random.randint(0, 99999)
+        self.seed = random.SystemRandom().randint(0, MAX_SEED)
         self.rng = random.Random(self.seed)
 
         self.nodes = {}
@@ -55,16 +58,18 @@ class RoadNetworkApp:
         self.end_node = None
         self.shortest_path_keys = set()
 
-        self.segment_artists = {}
         self.vehicles = []
         self.build_position = 0.0
         self.build_finished = False
+        self.last_revealed_column = -1
+        self.frame_counter = 0
 
         self.fig, self.ax = self.create_window()
         self.create_interface()
 
-        self.generate_network(new_endpoints=True)
+        self.generate_network(seed=self.seed, new_endpoints=True)
         self.rebuild_scene()
+        self.sync_seed_box()
 
         self.animation = FuncAnimation(
             self.fig,
@@ -88,10 +93,10 @@ class RoadNetworkApp:
         except Exception:
             pass
 
-        ax = fig.add_axes([0.05, 0.22, 0.70, 0.64])
+        ax = fig.add_axes([0.045, 0.235, 0.705, 0.615])
         ax.set_facecolor(C["bg"])
-        ax.set_xlim(-0.8, self.cols - 0.2)
-        ax.set_ylim(-0.8, self.rows - 0.2)
+        ax.set_xlim(-0.9, self.cols - 0.1)
+        ax.set_ylim(-0.9, self.rows - 0.1)
         ax.set_aspect("equal")
         ax.axis("off")
 
@@ -100,7 +105,7 @@ class RoadNetworkApp:
     def create_interface(self):
         self.fig.text(
             0.05,
-            0.95,
+            0.955,
             "ROAD NETWORK",
             color=C["white"],
             fontsize=24,
@@ -109,10 +114,10 @@ class RoadNetworkApp:
 
         self.fig.text(
             0.05,
-            0.915,
-            "Routes procédurales strictement gauche → droite",
+            0.922,
+            "Procedural routing engine  /  strictly forward  /  deterministic seeds",
             color=C["muted"],
-            fontsize=10.5,
+            fontsize=10,
         )
 
         self.header_status = self.fig.text(
@@ -120,12 +125,18 @@ class RoadNetworkApp:
             0.882,
             "",
             color=C["cyan"],
-            fontsize=10,
+            fontsize=9.5,
             family="monospace",
+            bbox={
+                "boxstyle": "round,pad=0.45",
+                "facecolor": C["panel"],
+                "edgecolor": C["border"],
+                "linewidth": 1,
+            },
         )
 
-        # Dedicated side panel: no figure-text collisions.
-        self.side_ax = self.fig.add_axes([0.785, 0.22, 0.185, 0.64])
+        # ---------- side card ----------
+        self.side_ax = self.fig.add_axes([0.775, 0.235, 0.195, 0.615])
         self.side_ax.set_facecolor(C["panel"])
         self.side_ax.set_xlim(0, 1)
         self.side_ax.set_ylim(0, 1)
@@ -133,12 +144,12 @@ class RoadNetworkApp:
         self.side_ax.set_yticks([])
 
         for spine in self.side_ax.spines.values():
-            spine.set_color("#1B3345")
-            spine.set_linewidth(1.2)
+            spine.set_color(C["border"])
+            spine.set_linewidth(1.1)
 
         self.side_ax.text(
-            0.10,
-            0.93,
+            0.09,
+            0.94,
             "NETWORK STATUS",
             color=C["white"],
             fontsize=12,
@@ -146,123 +157,126 @@ class RoadNetworkApp:
             va="top",
         )
 
+        self.side_ax.text(
+            0.09,
+            0.895,
+            "LIVE SIMULATION",
+            color=C["cyan"],
+            fontsize=7.5,
+            family="monospace",
+            va="top",
+        )
+
         self.side_ax.plot(
-            [0.10, 0.90],
-            [0.875, 0.875],
-            color="#203A4D",
+            [0.09, 0.91],
+            [0.855, 0.855],
+            color=C["border"],
             linewidth=1,
         )
 
         self.stat_labels = {}
         stat_rows = [
             ("state", "State"),
+            ("seed", "Seed"),
             ("segments", "Segments"),
             ("routes", "Routes"),
-            ("intersections", "Intersections"),
+            ("intersections", "Junctions"),
             ("vehicles", "Vehicles"),
-            ("grid", "Grid"),
         ]
 
-        y = 0.81
+        y = 0.80
         for key, label in stat_rows:
             self.side_ax.text(
-                0.10,
+                0.09,
                 y,
                 label.upper(),
                 color=C["muted"],
-                fontsize=8.5,
+                fontsize=8,
                 family="monospace",
                 va="center",
             )
             self.stat_labels[key] = self.side_ax.text(
-                0.90,
+                0.91,
                 y,
                 "",
                 color=C["white"],
-                fontsize=9.5,
+                fontsize=9.2,
                 family="monospace",
                 ha="right",
                 va="center",
             )
-            y -= 0.07
+            y -= 0.064
+
+        self.side_ax.plot(
+            [0.09, 0.91],
+            [0.385, 0.385],
+            color=C["border"],
+            linewidth=1,
+        )
 
         self.side_ax.text(
-            0.10,
-            0.37,
+            0.09,
+            0.345,
             "LEGEND",
             color=C["white"],
-            fontsize=10,
+            fontsize=9.5,
             fontweight="bold",
         )
 
         legend = [
             (C["green"], "Start"),
             (C["red"], "End"),
-            (C["orange"], "Intersection"),
+            (C["orange"], "Junction"),
             (C["road"], "Connection"),
             (C["cyan"], "Shortest path"),
         ]
 
-        y = 0.31
+        y = 0.295
         for color, label in legend:
-            self.side_ax.scatter([0.13], [y], s=65, color=color, zorder=2)
+            self.side_ax.scatter([0.13], [y], s=58, color=color, zorder=2)
             self.side_ax.text(
                 0.23,
                 y,
                 label,
                 color=C["white"],
-                fontsize=9,
+                fontsize=8.8,
                 va="center",
             )
-            y -= 0.055
+            y -= 0.048
 
+        # A dedicated rule card prevents the old legend/text overlap.
         self.side_ax.text(
-            0.10,
-            0.055,
-            "Every edge advances exactly\none column to the right.",
-            color=C["muted"],
-            fontsize=8.5,
-            linespacing=1.4,
+            0.09,
+            0.025,
+            "RULE  x → x + 1   •   no backward edge",
+            color=C["cyan"],
+            fontsize=7.4,
+            family="monospace",
             va="bottom",
         )
 
-        # Controls use their own axes and stay above the plot.
+        # ---------- controls ----------
+        self.fig.text(
+            0.05,
+            0.185,
+            "CONTROLS",
+            color=C["muted"],
+            fontsize=8,
+            family="monospace",
+        )
+
         self.sliders = {}
-
         self.sliders["Routes"] = self.make_slider(
-            [0.075, 0.135, 0.22, 0.024],
-            "Routes",
-            1,
-            9,
-            self.route_count,
-            1,
+            [0.075, 0.135, 0.205, 0.020], "Routes", 1, 9, self.route_count, 1
         )
-
         self.sliders["Vehicles"] = self.make_slider(
-            [0.075, 0.082, 0.22, 0.024],
-            "Vehicles",
-            1,
-            30,
-            self.vehicle_count,
-            1,
+            [0.075, 0.087, 0.205, 0.020], "Vehicles", 1, 30, self.vehicle_count, 1
         )
-
         self.sliders["Construction"] = self.make_slider(
-            [0.385, 0.135, 0.22, 0.024],
-            "Construction",
-            0.25,
-            4.0,
-            self.build_speed,
-            None,
+            [0.355, 0.135, 0.205, 0.020], "Build", 0.25, 4.0, self.build_speed, None
         )
-
         self.sliders["Traffic"] = self.make_slider(
-            [0.385, 0.082, 0.22, 0.024],
-            "Traffic",
-            0.25,
-            4.0,
-            self.traffic_speed,
-            None,
+            [0.355, 0.087, 0.205, 0.020], "Traffic", 0.25, 4.0, self.traffic_speed, None
         )
 
         self.sliders["Routes"].on_changed(self.on_route_count)
@@ -270,28 +284,54 @@ class RoadNetworkApp:
         self.sliders["Construction"].on_changed(self.on_speed_change)
         self.sliders["Traffic"].on_changed(self.on_speed_change)
 
-        self.random_button = self.make_button(
-            [0.67, 0.115, 0.09, 0.052],
-            "RANDOMIZE",
-        )
-        self.pause_button = self.make_button(
-            [0.775, 0.115, 0.08, 0.052],
-            "PAUSE",
-        )
-        self.replay_button = self.make_button(
-            [0.87, 0.115, 0.08, 0.052],
-            "REPLAY",
-        )
+        self.random_button = self.make_button([0.60, 0.132, 0.095, 0.045], "RANDOMIZE")
+        self.pause_button = self.make_button([0.705, 0.132, 0.075, 0.045], "PAUSE")
+        self.replay_button = self.make_button([0.79, 0.132, 0.075, 0.045], "REPLAY")
 
         self.new_path_button = self.make_button(
-            [0.775, 0.055, 0.175, 0.042],
-            "NEW ROADS · SAME ENDS",
+            [0.60, 0.075, 0.18, 0.040], "NEW ROADS · SAME ENDS"
+        )
+
+        seed_ax = self.fig.add_axes([0.80, 0.075, 0.105, 0.040])
+        seed_ax.set_facecolor(C["panel"])
+        self.seed_box = TextBox(
+            seed_ax,
+            "",
+            initial=str(self.seed),
+            color=C["panel"],
+            hovercolor=C["panel_2"],
+        )
+        self.seed_box.text_disp.set_color(C["white"])
+        self.seed_box.text_disp.set_fontfamily("monospace")
+        self.seed_box.text_disp.set_fontsize(9)
+        for spine in seed_ax.spines.values():
+            spine.set_color(C["border"])
+
+        self.load_seed_button = self.make_button([0.915, 0.075, 0.055, 0.040], "LOAD")
+
+        self.fig.text(
+            0.80,
+            0.119,
+            "SEED",
+            color=C["muted"],
+            fontsize=7.5,
+            family="monospace",
+        )
+
+        self.seed_feedback = self.fig.text(
+            0.80,
+            0.052,
+            "Enter a seed to reproduce a network",
+            color=C["muted"],
+            fontsize=7.2,
         )
 
         self.random_button.on_clicked(self.randomize)
         self.pause_button.on_clicked(self.toggle_pause)
         self.replay_button.on_clicked(self.replay)
         self.new_path_button.on_clicked(self.new_roads_same_endpoints)
+        self.load_seed_button.on_clicked(self.load_seed)
+        self.seed_box.on_submit(self.load_seed)
 
     def make_slider(self, bounds, label, minimum, maximum, initial, step):
         slider_ax = self.fig.add_axes(bounds)
@@ -306,14 +346,18 @@ class RoadNetworkApp:
             valstep=step,
             color=C["cyan"],
         )
-
         slider.label.set_color(C["white"])
+        slider.label.set_fontsize(8.5)
         slider.valtext.set_color(C["white"])
+        slider.valtext.set_fontsize(8.5)
         return slider
 
     def make_button(self, bounds, label):
         button_ax = self.fig.add_axes(bounds)
         button_ax.set_zorder(50)
+
+        for spine in button_ax.spines.values():
+            spine.set_color(C["border"])
 
         button = Button(
             button_ax,
@@ -322,7 +366,7 @@ class RoadNetworkApp:
             hovercolor=C["panel_2"],
         )
         button.label.set_color(C["white"])
-        button.label.set_fontsize(9)
+        button.label.set_fontsize(8.2)
         return button
 
     # ------------------------------------------------------------------
@@ -331,29 +375,33 @@ class RoadNetworkApp:
 
     def make_grid(self):
         self.nodes = {}
-
         for y in range(self.rows):
             for x in range(self.cols):
                 node_id = y * self.cols + x
                 self.nodes[(x, y)] = Node(node_id, x, y)
 
-    def generate_network(self, new_endpoints=True):
-        self.seed = random.randint(0, 99999)
-        self.rng = random.Random(self.seed)
+    def generate_network(self, seed=None, new_endpoints=True):
+        previous_start_y = self.start_node.y if self.start_node is not None else None
+        previous_end_y = self.end_node.y if self.end_node is not None else None
 
+        if seed is not None:
+            self.seed = int(seed) % (MAX_SEED + 1)
+
+        self.rng = random.Random(self.seed)
         self.make_grid()
+
         self.routes = []
         self.segments = []
         self.segment_by_key = {}
         self.forward_graph = defaultdict(list)
         self.node_usage = defaultdict(int)
 
-        if new_endpoints or self.start_node is None or self.end_node is None:
+        if new_endpoints or previous_start_y is None or previous_end_y is None:
             start_y = self.rng.randint(2, self.rows - 3)
             end_y = self.rng.randint(2, self.rows - 3)
         else:
-            start_y = self.start_node.y
-            end_y = self.end_node.y
+            start_y = previous_start_y
+            end_y = previous_end_y
 
         self.start_node = self.nodes[(0, start_y)]
         self.end_node = self.nodes[(self.cols - 1, end_y)]
@@ -370,17 +418,9 @@ class RoadNetworkApp:
 
         self.classify_nodes()
         self.compute_shortest_path()
-        self.update_status_text()
 
     def generate_route(self, route_index):
-        """
-        Hard constraint:
-        x always increases by exactly 1.
-
-        At every column the route may only choose:
-        up-right, right, or down-right.
-        It can therefore NEVER go backwards.
-        """
+        """Create a route where every edge is exactly x -> x + 1."""
         route = [self.start_node]
         current = self.start_node
         last_dy = 0
@@ -395,81 +435,88 @@ class RoadNetworkApp:
 
                 for dy in (-1, 0, 1):
                     y = current.y + dy
-
                     if not 0 <= y < self.rows:
                         continue
 
-                    # From this candidate, the destination must remain reachable
-                    # with at most one vertical step per remaining column.
+                    # The destination must still be reachable.
                     if abs(self.end_node.y - y) > remaining:
+                        continue
+
+                    candidate = self.nodes[(next_x, y)]
+
+                    # No X-shaped crossings between two diagonal edges.
+                    if self.edge_would_cross(current, candidate):
                         continue
 
                     valid.append((dy, y))
 
                 if not valid:
-                    direction = (
-                        1
-                        if self.end_node.y > current.y
-                        else -1
-                        if self.end_node.y < current.y
-                        else 0
+                    # Reachability-safe fallback. Crossing prevention is relaxed
+                    # only if every clean candidate is impossible.
+                    for dy in (-1, 0, 1):
+                        y = current.y + dy
+                        if 0 <= y < self.rows and abs(self.end_node.y - y) <= remaining:
+                            valid.append((dy, y))
+
+                scored = []
+
+                for dy, y in valid:
+                    candidate = self.nodes[(next_x, y)]
+
+                    reuse_penalty = self.node_usage.get(candidate, 0) * 0.50
+                    reversal_penalty = 0.85 if last_dy != 0 and dy == -last_dy else 0.0
+                    momentum_bonus = 0.28 if dy == last_dy else 0.0
+                    straight_bonus = 0.08 if dy == 0 else 0.0
+                    target_pull = abs(self.end_node.y - y) * 0.03
+
+                    # Different routes tend to occupy different vertical lanes.
+                    lane = (route_index - (self.route_count - 1) / 2) * 0.035
+                    lane_bonus = lane * (y - self.rows / 2)
+
+                    score = (
+                        self.rng.random()
+                        + momentum_bonus
+                        + straight_bonus
+                        + lane_bonus
+                        - reuse_penalty
+                        - reversal_penalty
+                        - target_pull
                     )
-                    next_y = current.y + direction
-                    next_y = max(0, min(self.rows - 1, next_y))
-                    last_dy = direction
-                else:
-                    scored = []
+                    scored.append((score, dy, y))
 
-                    for dy, y in valid:
-                        candidate = self.nodes[(next_x, y)]
-
-                        # Randomness is dominant, but duplicated paths are
-                        # discouraged and violent zig-zags are slightly penalised.
-                        reuse_penalty = self.node_usage.get(candidate, 0) * 0.55
-                        turn_penalty = 0.32 if last_dy != 0 and dy == -last_dy else 0.0
-                        straight_bonus = 0.12 if dy == last_dy else 0.0
-                        target_pull = abs(self.end_node.y - y) * 0.035
-
-                        # Give each route a tiny personality so parallel roads
-                        # spread naturally instead of perfectly overlapping.
-                        lane_bias = ((route_index % 3) - 1) * dy * 0.06
-
-                        score = (
-                            self.rng.random()
-                            + straight_bonus
-                            + lane_bias
-                            - reuse_penalty
-                            - turn_penalty
-                            - target_pull
-                        )
-
-                        scored.append((score, dy, y))
-
-                    scored.sort(key=lambda item: item[0], reverse=True)
-                    _, last_dy, next_y = scored[0]
+                scored.sort(key=lambda item: item[0], reverse=True)
+                _, last_dy, next_y = scored[0]
 
             current = self.nodes[(next_x, next_y)]
             route.append(current)
 
         return route
 
+    def edge_would_cross(self, a, b):
+        """Reject diagonal X-crossings that do not meet on a grid node."""
+        for segment in self.segments:
+            if segment.start.x != a.x:
+                continue
+
+            d0 = a.y - segment.start.y
+            d1 = b.y - segment.end.y
+
+            if d0 * d1 < 0:
+                return True
+
+        return False
+
     def register_segment(self, a, b):
-        # Generation only calls this with b.x == a.x + 1.
         key = (a.id, b.id)
 
         if key not in self.segment_by_key:
-            segment = Segment(
-                a,
-                b,
-                bend=self.rng.uniform(-0.12, 0.12),
-            )
+            segment = Segment(a, b)
             self.segment_by_key[key] = segment
             self.segments.append(segment)
             self.forward_graph[a].append((b, segment))
-        else:
-            segment = self.segment_by_key[key]
+            return segment
 
-        return segment
+        return self.segment_by_key[key]
 
     def classify_nodes(self):
         incoming = defaultdict(int)
@@ -481,13 +528,15 @@ class RoadNetworkApp:
                 incoming[b] += 1
 
         for node in self.nodes.values():
+            degree = incoming[node] + outgoing[node]
+
             if node == self.start_node:
                 node.type = NodeType.Start
             elif node == self.end_node:
                 node.type = NodeType.End
-            elif incoming[node] + outgoing[node] >= 3:
+            elif degree >= 3:
                 node.type = NodeType.Intersection
-            elif incoming[node] + outgoing[node] > 0:
+            elif degree > 0:
                 node.type = NodeType.Connection
             else:
                 node.type = NodeType.Unused
@@ -514,13 +563,9 @@ class RoadNetworkApp:
                 if candidate < distances.get(neighbour, float("inf")):
                     distances[neighbour] = candidate
                     previous[neighbour] = (node, segment)
-                    heapq.heappush(
-                        queue,
-                        (candidate, neighbour.id, neighbour),
-                    )
+                    heapq.heappush(queue, (candidate, neighbour.id, neighbour))
 
         node = self.end_node
-
         while node in previous:
             parent, segment = previous[node]
             self.shortest_path_keys.add((segment.start.id, segment.end.id))
@@ -533,136 +578,87 @@ class RoadNetworkApp:
     def rebuild_scene(self):
         self.ax.clear()
         self.ax.set_facecolor(C["bg"])
-        self.ax.set_xlim(-0.8, self.cols - 0.2)
-        self.ax.set_ylim(-0.8, self.rows - 0.2)
+        self.ax.set_xlim(-0.9, self.cols - 0.1)
+        self.ax.set_ylim(-0.9, self.rows - 0.1)
         self.ax.set_aspect("equal")
         self.ax.axis("off")
 
+        # Subtle horizontal guides give the map depth without visual noise.
+        for y in range(self.rows):
+            self.ax.plot(
+                [-0.2, self.cols - 0.8],
+                [y, y],
+                color=C["grid"],
+                linewidth=0.35,
+                alpha=0.18,
+                zorder=0,
+            )
+
         xs = [node.x for node in self.nodes.values()]
         ys = [node.y for node in self.nodes.values()]
+        self.ax.scatter(xs, ys, s=9, color=C["grid_bright"], alpha=0.52, zorder=1)
 
-        self.ax.scatter(
-            xs,
-            ys,
-            s=11,
-            color=C["grid"],
-            alpha=0.72,
-            zorder=1,
+        self.road_glow = LineCollection(
+            [], colors=C["cyan"], linewidths=8.0, alpha=0.075, zorder=2
+        )
+        self.road_lines = LineCollection(
+            [], colors=C["road"], linewidths=2.15, alpha=0.92, zorder=3
+        )
+        self.path_glow = LineCollection(
+            [], colors=C["cyan"], linewidths=4.5, alpha=0.92, zorder=4
         )
 
-        # Destination markers are always visible.
-        self.ax.scatter(
-            [self.start_node.x],
-            [self.start_node.y],
-            s=145,
-            color=C["green"],
-            edgecolors=C["bg"],
-            linewidths=2,
-            zorder=10,
-        )
+        self.ax.add_collection(self.road_glow)
+        self.ax.add_collection(self.road_lines)
+        self.ax.add_collection(self.path_glow)
 
-        self.ax.scatter(
-            [self.end_node.x],
-            [self.end_node.y],
-            s=145,
-            color=C["red"],
-            edgecolors=C["bg"],
-            linewidths=2,
-            zorder=10,
+        self.start_marker = self.ax.scatter(
+            [self.start_node.x], [self.start_node.y],
+            s=105, color=C["green"], edgecolors=C["white"], linewidths=1.0, zorder=10
         )
-
-        self.ax.text(
-            self.start_node.x + 0.25,
-            self.start_node.y + 0.32,
-            "START",
-            color=C["green"],
-            fontsize=8,
-            fontweight="bold",
-            zorder=11,
+        self.end_marker = self.ax.scatter(
+            [self.end_node.x], [self.end_node.y],
+            s=105, color=C["red"], edgecolors=C["white"], linewidths=1.0, zorder=10
+        )
+        self.start_ring = self.ax.scatter(
+            [self.start_node.x], [self.start_node.y],
+            s=220, facecolors="none", edgecolors=C["green"], linewidths=1.1,
+            alpha=0.25, zorder=9
+        )
+        self.end_ring = self.ax.scatter(
+            [self.end_node.x], [self.end_node.y],
+            s=220, facecolors="none", edgecolors=C["red"], linewidths=1.1,
+            alpha=0.25, zorder=9
         )
 
         self.ax.text(
-            self.end_node.x - 0.25,
-            self.end_node.y + 0.32,
-            "END",
-            color=C["red"],
-            fontsize=8,
-            fontweight="bold",
-            ha="right",
-            zorder=11,
+            self.start_node.x + 0.25, self.start_node.y + 0.35, "START",
+            color=C["green"], fontsize=7.5, fontweight="bold", zorder=11
         )
-
-        self.segment_artists = {}
-
-        for segment in self.segments:
-            key = (segment.start.id, segment.end.id)
-
-            glow, = self.ax.plot(
-                [],
-                [],
-                color=C["cyan"],
-                linewidth=8,
-                alpha=0.09,
-                solid_capstyle="round",
-                zorder=2,
-            )
-
-            road, = self.ax.plot(
-                [],
-                [],
-                color=C["road"],
-                linewidth=2.3,
-                alpha=0.95,
-                solid_capstyle="round",
-                zorder=3,
-            )
-
-            path = None
-            if key in self.shortest_path_keys:
-                path, = self.ax.plot(
-                    [],
-                    [],
-                    color=C["cyan"],
-                    linewidth=4.6,
-                    alpha=0.92,
-                    solid_capstyle="round",
-                    zorder=4,
-                )
-
-            self.segment_artists[key] = (glow, road, path)
+        self.ax.text(
+            self.end_node.x - 0.25, self.end_node.y + 0.35, "END",
+            color=C["red"], fontsize=7.5, fontweight="bold", ha="right", zorder=11
+        )
 
         self.intersection_scatter = self.ax.scatter(
-            [],
-            [],
-            s=60,
-            color=C["orange"],
-            edgecolors=C["bg"],
-            linewidths=1.2,
-            zorder=8,
+            [], [], s=58, color=C["orange"], edgecolors=C["bg"], linewidths=1.2, zorder=8
         )
-
         self.connection_scatter = self.ax.scatter(
-            [],
-            [],
-            s=21,
-            color=C["road"],
-            edgecolors=C["bg"],
-            linewidths=0.8,
-            zorder=7,
+            [], [], s=17, color=C["road"], edgecolors=C["bg"], linewidths=0.7, zorder=7
         )
-
+        self.build_head_scatter = self.ax.scatter(
+            [], [], s=35, color=C["cyan"], edgecolors=C["white"], linewidths=0.6, zorder=11
+        )
+        self.vehicle_glow_scatter = self.ax.scatter(
+            [], [], s=150, color=C["cyan"], alpha=0.12, edgecolors="none", zorder=11
+        )
         self.vehicle_scatter = self.ax.scatter(
-            [],
-            [],
-            s=54,
-            color=C["white"],
-            edgecolors=C["cyan"],
-            linewidths=1.7,
-            zorder=12,
+            [], [], s=42, color=C["white"], edgecolors=C["cyan"], linewidths=1.5, zorder=12
         )
 
         self.build_position = 0.0
         self.build_finished = False
+        self.last_revealed_column = -1
         self.make_vehicles()
 
         self.update_build_drawing()
@@ -670,61 +666,60 @@ class RoadNetworkApp:
         self.fig.canvas.draw_idle()
 
     def update_build_drawing(self):
+        roads = []
+        shortest = []
+        heads = []
+
         for segment in self.segments:
-            key = (segment.start.id, segment.end.id)
-            local_progress = self.build_position - segment.start.x
-            local_progress = max(0.0, min(1.0, local_progress))
+            progress = max(0.0, min(1.0, self.build_position - segment.start.x))
 
-            xs, ys = segment.sample(30, local_progress)
-            glow, road, path = self.segment_artists[key]
-
-            if local_progress <= 0.0:
-                glow.set_data([], [])
-                road.set_data([], [])
-                if path is not None:
-                    path.set_data([], [])
+            if progress <= 0.0:
                 continue
 
-            glow.set_data(xs, ys)
-            road.set_data(xs, ys)
+            x, y = segment.point_at(progress)
+            line = [(segment.start.x, segment.start.y), (x, y)]
+            roads.append(line)
 
-            if path is not None:
-                path.set_data(xs, ys)
+            key = (segment.start.id, segment.end.id)
+            if key in self.shortest_path_keys:
+                shortest.append(line)
 
-        self.update_visible_nodes()
+            if 0.0 < progress < 1.0:
+                heads.append((x, y))
 
-    def update_visible_nodes(self):
-        intersections_x = []
-        intersections_y = []
-        connections_x = []
-        connections_y = []
+        self.road_glow.set_segments(roads)
+        self.road_lines.set_segments(roads)
+        self.path_glow.set_segments(shortest)
 
-        reveal_x = self.build_position + 0.02
+        if heads:
+            self.build_head_scatter.set_offsets(heads)
+        else:
+            self.build_head_scatter.set_offsets(np.empty((0, 2)))
+
+        reveal_column = min(self.cols - 1, int(self.build_position + 0.02))
+        if reveal_column != self.last_revealed_column:
+            self.last_revealed_column = reveal_column
+            self.update_visible_nodes(reveal_column)
+
+    def update_visible_nodes(self, reveal_column):
+        junctions = []
+        connections = []
 
         for node in self.nodes.values():
-            if node.x > reveal_x:
+            if node.x > reveal_column:
                 continue
 
             if node.type == NodeType.Intersection:
-                intersections_x.append(node.x)
-                intersections_y.append(node.y)
+                junctions.append((node.x, node.y))
             elif node.type == NodeType.Connection:
-                connections_x.append(node.x)
-                connections_y.append(node.y)
+                connections.append((node.x, node.y))
 
-        if intersections_x:
-            self.intersection_scatter.set_offsets(
-                list(zip(intersections_x, intersections_y))
-            )
-        else:
-            self.intersection_scatter.set_offsets(np.empty((0, 2)))
-
-        if connections_x:
-            self.connection_scatter.set_offsets(
-                list(zip(connections_x, connections_y))
-            )
-        else:
-            self.connection_scatter.set_offsets(np.empty((0, 2)))
+        self.intersection_scatter.set_offsets(
+            junctions if junctions else np.empty((0, 2))
+        )
+        self.connection_scatter.set_offsets(
+            connections if connections else np.empty((0, 2))
+        )
 
     # ------------------------------------------------------------------
     # VEHICLES
@@ -732,22 +727,20 @@ class RoadNetworkApp:
 
     def make_vehicles(self):
         self.vehicles = []
-
         first_edges = self.forward_graph[self.start_node]
 
         if not first_edges:
             return
 
-        for _ in range(self.vehicle_count):
+        for index in range(self.vehicle_count):
             next_node, segment = self.rng.choice(first_edges)
-
             self.vehicles.append(
                 {
                     "from": self.start_node,
                     "to": next_node,
                     "segment": segment,
-                    "progress": self.rng.random() * 0.85,
-                    "speed": self.rng.uniform(0.007, 0.014),
+                    "progress": (index / max(self.vehicle_count, 1)) * 0.9,
+                    "speed": self.rng.uniform(0.010, 0.017),
                 }
             )
 
@@ -757,7 +750,6 @@ class RoadNetworkApp:
             return False
 
         next_node, segment = self.rng.choice(choices)
-
         vehicle["from"] = self.start_node
         vehicle["to"] = next_node
         vehicle["segment"] = segment
@@ -767,6 +759,7 @@ class RoadNetworkApp:
     def update_vehicles(self):
         if not self.build_finished:
             self.vehicle_scatter.set_offsets(np.empty((0, 2)))
+            self.vehicle_glow_scatter.set_offsets(np.empty((0, 2)))
             return
 
         positions = []
@@ -774,18 +767,18 @@ class RoadNetworkApp:
         for vehicle in self.vehicles:
             vehicle["progress"] += vehicle["speed"] * self.traffic_speed
 
-            if vehicle["progress"] >= 1.0:
+            while vehicle["progress"] >= 1.0:
+                overflow = vehicle["progress"] - 1.0
                 current = vehicle["to"]
 
                 if current == self.end_node:
                     if not self.restart_vehicle(vehicle):
-                        continue
+                        break
                 else:
                     choices = self.forward_graph[current]
-
                     if not choices:
                         if not self.restart_vehicle(vehicle):
-                            continue
+                            break
                     else:
                         next_node, segment = self.rng.choice(choices)
                         vehicle["from"] = current
@@ -793,67 +786,79 @@ class RoadNetworkApp:
                         vehicle["segment"] = segment
                         vehicle["progress"] = 0.0
 
-            positions.append(
-                vehicle["segment"].point_at(vehicle["progress"])
-            )
+                vehicle["progress"] += overflow
 
-        self.vehicle_scatter.set_offsets(positions)
+            positions.append(vehicle["segment"].point_at(vehicle["progress"]))
+
+        offsets = positions if positions else np.empty((0, 2))
+        self.vehicle_glow_scatter.set_offsets(offsets)
+        self.vehicle_scatter.set_offsets(offsets)
 
     # ------------------------------------------------------------------
     # STATE / CALLBACKS
     # ------------------------------------------------------------------
 
     def update_status_text(self):
-        intersections = sum(
-            node.type == NodeType.Intersection
-            for node in self.nodes.values()
+        junctions = sum(
+            node.type == NodeType.Intersection for node in self.nodes.values()
         )
 
-        if self.build_finished:
-            state = "TRAFFIC"
-        elif self.paused:
+        if self.paused:
             state = "PAUSED"
+        elif self.build_finished:
+            state = "TRAFFIC"
         else:
-            percent = min(
-                100,
-                int(self.build_position / (self.cols - 1) * 100),
-            )
+            percent = min(100, int(self.build_position / (self.cols - 1) * 100))
             state = f"BUILD {percent:02d}%"
 
         self.header_status.set_text(
-            f"seed {self.seed:05d}  •  "
-            f"{self.route_count} routes  •  "
-            f"{len(self.segments)} links"
+            f"SEED {self.seed:09d}   •   {self.route_count} ROUTES   •   "
+            f"{len(self.segments)} LINKS"
         )
 
         self.stat_labels["state"].set_text(state)
+        self.stat_labels["seed"].set_text(f"{self.seed:09d}")
         self.stat_labels["segments"].set_text(str(len(self.segments)))
         self.stat_labels["routes"].set_text(str(self.route_count))
-        self.stat_labels["intersections"].set_text(str(intersections))
+        self.stat_labels["intersections"].set_text(str(junctions))
         self.stat_labels["vehicles"].set_text(str(self.vehicle_count))
-        self.stat_labels["grid"].set_text(f"{self.cols}×{self.rows}")
 
     def update(self, _frame):
+        self.frame_counter += 1
+
+        # Small pulse on the endpoint rings; cheap but makes the UI feel alive.
+        pulse = 220 + 18 * np.sin(self.frame_counter * 0.08)
+        self.start_ring.set_sizes([pulse])
+        self.end_ring.set_sizes([pulse])
+
         if self.paused:
             return
 
         if not self.build_finished:
-            # All routes grow together from left to right.
-            self.build_position += 0.075 * self.build_speed
+            self.build_position += 0.095 * self.build_speed
 
             if self.build_position >= self.cols - 1:
                 self.build_position = self.cols - 1
                 self.build_finished = True
+                self.build_head_scatter.set_offsets(np.empty((0, 2)))
 
             self.update_build_drawing()
-            self.update_status_text()
+
+            # Updating text less often avoids unnecessary text layout work.
+            if self.frame_counter % 4 == 0 or self.build_finished:
+                self.update_status_text()
         else:
             self.update_vehicles()
 
     def on_route_count(self, value):
-        self.route_count = int(value)
-        self.update_status_text()
-        self.fig.canvas.draw_idle()
+        new_count = int(value)
+        if new_count == self.route_count:
+            return
+
+        self.route_count = new_count
+        # Same seed + new route count = deterministic variation.
+        self.generate_network(seed=self.seed, new_endpoints=True)
+        self.rebuild_scene()
 
     def on_vehicle_count(self, value):
         self.vehicle_count = int(value)
@@ -864,46 +869,78 @@ class RoadNetworkApp:
     def on_speed_change(self, _value):
         self.build_speed = float(self.sliders["Construction"].val)
         self.traffic_speed = float(self.sliders["Traffic"].val)
-        self.fig.canvas.draw_idle()
 
     def randomize(self, _event):
-        self.route_count = int(self.sliders["Routes"].val)
-        self.vehicle_count = int(self.sliders["Vehicles"].val)
+        self.seed = random.SystemRandom().randint(0, MAX_SEED)
         self.paused = False
         self.pause_button.label.set_text("PAUSE")
 
-        self.generate_network(new_endpoints=True)
+        self.generate_network(seed=self.seed, new_endpoints=True)
         self.rebuild_scene()
-        self.fig.canvas.draw_idle()
+        self.sync_seed_box()
+        self.seed_feedback.set_text("New random seed generated")
+        self.seed_feedback.set_color(C["green"])
 
     def new_roads_same_endpoints(self, _event):
-        self.route_count = int(self.sliders["Routes"].val)
-        self.vehicle_count = int(self.sliders["Vehicles"].val)
+        new_seed = random.SystemRandom().randint(0, MAX_SEED)
         self.paused = False
         self.pause_button.label.set_text("PAUSE")
 
-        self.generate_network(new_endpoints=False)
+        self.generate_network(seed=new_seed, new_endpoints=False)
         self.rebuild_scene()
-        self.fig.canvas.draw_idle()
+        self.sync_seed_box()
+        self.seed_feedback.set_text("New roads · endpoints preserved")
+        self.seed_feedback.set_color(C["cyan"])
 
     def replay(self, _event):
         self.paused = False
         self.pause_button.label.set_text("PAUSE")
         self.build_position = 0.0
         self.build_finished = False
+        self.last_revealed_column = -1
         self.make_vehicles()
         self.update_build_drawing()
         self.update_status_text()
         self.vehicle_scatter.set_offsets(np.empty((0, 2)))
+        self.vehicle_glow_scatter.set_offsets(np.empty((0, 2)))
         self.fig.canvas.draw_idle()
 
     def toggle_pause(self, _event):
         self.paused = not self.paused
-        self.pause_button.label.set_text(
-            "RESUME" if self.paused else "PAUSE"
-        )
+        self.pause_button.label.set_text("RESUME" if self.paused else "PAUSE")
         self.update_status_text()
         self.fig.canvas.draw_idle()
+
+    def load_seed(self, _event=None):
+        raw = self.seed_box.text.strip()
+
+        try:
+            seed = int(raw)
+            if seed < 0:
+                raise ValueError
+        except ValueError:
+            self.seed_feedback.set_text("Invalid seed · use a positive integer")
+            self.seed_feedback.set_color(C["red"])
+            return
+
+        self.seed = seed % (MAX_SEED + 1)
+        self.paused = False
+        self.pause_button.label.set_text("PAUSE")
+
+        self.generate_network(seed=self.seed, new_endpoints=True)
+        self.rebuild_scene()
+        self.sync_seed_box()
+        self.seed_feedback.set_text("Seed loaded · network reproduced")
+        self.seed_feedback.set_color(C["green"])
+
+    def sync_seed_box(self):
+        if not hasattr(self, "seed_box"):
+            return
+
+        previous = self.seed_box.eventson
+        self.seed_box.eventson = False
+        self.seed_box.set_val(str(self.seed))
+        self.seed_box.eventson = previous
 
     def show(self):
         plt.show()
