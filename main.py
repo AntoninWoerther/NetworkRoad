@@ -54,8 +54,6 @@ class RoadNetworkApp:
         self.segment_by_key = {}
         self.forward_graph = defaultdict(list)
         self.node_usage = defaultdict(int)
-        self.segment_build_stage = {}
-        self.route_lengths = []
 
         self.start_node = None
         self.end_node = None
@@ -404,6 +402,10 @@ class RoadNetworkApp:
         self.segment_by_key = {}
         self.forward_graph = defaultdict(list)
         self.node_usage = defaultdict(int)
+        self.segment_build_stage = {}
+        self.route_lengths = []
+        self.shortest_distance = 0.0
+        self.max_build_stage = 1
 
         if new_endpoints or previous_start_y is None or previous_end_y is None:
             start_y = self.rng.randint(2, self.rows - 3)
