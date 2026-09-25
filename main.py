@@ -1,6 +1,7 @@
 import heapq
 import random
 from collections import defaultdict
+from functools import lru_cache
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -248,7 +249,7 @@ class RoadNetworkApp:
         self.side_ax.text(
             0.09,
             0.025,
-            "RULE  x → x + 1   •   no backward edge",
+            "RULE  x → x + 1   •   max 2 same moves",
             color=C["cyan"],
             fontsize=7.4,
             family="monospace",
@@ -420,75 +421,147 @@ class RoadNetworkApp:
         self.compute_shortest_path()
 
     def generate_route(self, route_index):
-        """Create a route where every edge is exactly x -> x + 1."""
+        """
+        Create a route where:
+        - every edge is exactly x -> x + 1;
+        - the same direction (-1, 0 or +1) can be repeated at most twice;
+        - the route is guaranteed to finish exactly on END.
+        """
         route = [self.start_node]
         current = self.start_node
-        last_dy = 0
+
+        # None would work conceptually, but an int sentinel keeps the DP cache simple.
+        last_dy = 9
+        same_direction_count = 0
+        end_y = self.end_node.y
+
+        @lru_cache(maxsize=None)
+        def can_reach_end(y, steps_left, previous_dy, repeat_count):
+            """
+            True only when END can still be reached while respecting:
+            - grid bounds;
+            - max two consecutive moves in the same direction.
+            """
+            if steps_left == 0:
+                return y == end_y
+
+            for dy in (-1, 0, 1):
+                next_y = y + dy
+
+                if not 0 <= next_y < self.rows:
+                    continue
+
+                next_repeat = repeat_count + 1 if dy == previous_dy else 1
+                if next_repeat > 2:
+                    continue
+
+                if can_reach_end(
+                    next_y,
+                    steps_left - 1,
+                    dy,
+                    next_repeat,
+                ):
+                    return True
+
+            return False
 
         for next_x in range(1, self.cols):
-            remaining = self.cols - 1 - next_x
+            steps_after_this_move = self.cols - 1 - next_x
 
-            if next_x == self.cols - 1:
-                next_y = self.end_node.y
-            else:
-                valid = []
+            feasible = []
 
-                for dy in (-1, 0, 1):
-                    y = current.y + dy
-                    if not 0 <= y < self.rows:
-                        continue
+            for dy in (-1, 0, 1):
+                next_y = current.y + dy
 
-                    # The destination must still be reachable.
-                    if abs(self.end_node.y - y) > remaining:
-                        continue
+                if not 0 <= next_y < self.rows:
+                    continue
 
-                    candidate = self.nodes[(next_x, y)]
+                next_repeat = (
+                    same_direction_count + 1
+                    if dy == last_dy
+                    else 1
+                )
 
-                    # No X-shaped crossings between two diagonal edges.
-                    if self.edge_would_cross(current, candidate):
-                        continue
+                # Hard rule: never 3 times the same direction.
+                if next_repeat > 2:
+                    continue
 
-                    valid.append((dy, y))
+                # Hard rule: only keep moves from which END is still reachable.
+                if not can_reach_end(
+                    next_y,
+                    steps_after_this_move,
+                    dy,
+                    next_repeat,
+                ):
+                    continue
 
-                if not valid:
-                    # Reachability-safe fallback. Crossing prevention is relaxed
-                    # only if every clean candidate is impossible.
-                    for dy in (-1, 0, 1):
-                        y = current.y + dy
-                        if 0 <= y < self.rows and abs(self.end_node.y - y) <= remaining:
-                            valid.append((dy, y))
+                candidate = self.nodes[(next_x, next_y)]
+                feasible.append((dy, next_y, next_repeat, candidate))
 
-                scored = []
+            if not feasible:
+                raise RuntimeError(
+                    "No valid forward route can reach END with the current constraints."
+                )
 
-                for dy, y in valid:
-                    candidate = self.nodes[(next_x, y)]
+            # Crossing avoidance is visual only. If avoiding a crossing would make
+            # the route impossible, keep the valid route rather than breaking
+            # the two-directions rule or missing END.
+            clean = [
+                item
+                for item in feasible
+                if not self.edge_would_cross(current, item[3])
+            ]
+            choices = clean if clean else feasible
 
-                    reuse_penalty = self.node_usage.get(candidate, 0) * 0.50
-                    reversal_penalty = 0.85 if last_dy != 0 and dy == -last_dy else 0.0
-                    momentum_bonus = 0.28 if dy == last_dy else 0.0
-                    straight_bonus = 0.08 if dy == 0 else 0.0
-                    target_pull = abs(self.end_node.y - y) * 0.03
+            scored = []
 
-                    # Different routes tend to occupy different vertical lanes.
-                    lane = (route_index - (self.route_count - 1) / 2) * 0.035
-                    lane_bonus = lane * (y - self.rows / 2)
+            for dy, next_y, next_repeat, candidate in choices:
+                reuse_penalty = self.node_usage.get(candidate, 0) * 0.50
+                reversal_penalty = (
+                    0.85
+                    if last_dy in (-1, 1) and dy == -last_dy
+                    else 0.0
+                )
+                momentum_bonus = 0.18 if dy == last_dy else 0.0
+                straight_bonus = 0.06 if dy == 0 else 0.0
+                target_pull = abs(end_y - next_y) * 0.035
 
-                    score = (
-                        self.rng.random()
-                        + momentum_bonus
-                        + straight_bonus
-                        + lane_bonus
-                        - reuse_penalty
-                        - reversal_penalty
-                        - target_pull
-                    )
-                    scored.append((score, dy, y))
+                lane = (
+                    route_index - (self.route_count - 1) / 2
+                ) * 0.035
+                lane_bonus = lane * (next_y - self.rows / 2)
 
-                scored.sort(key=lambda item: item[0], reverse=True)
-                _, last_dy, next_y = scored[0]
+                # When a direction has already been used twice, it is already
+                # excluded above. After one repetition, slightly prefer changing
+                # direction so routes look less mechanical.
+                repeat_penalty = 0.12 if next_repeat == 2 else 0.0
 
-            current = self.nodes[(next_x, next_y)]
+                score = (
+                    self.rng.random()
+                    + momentum_bonus
+                    + straight_bonus
+                    + lane_bonus
+                    - reuse_penalty
+                    - reversal_penalty
+                    - target_pull
+                    - repeat_penalty
+                )
+
+                scored.append(
+                    (score, dy, next_y, next_repeat, candidate)
+                )
+
+            scored.sort(key=lambda item: item[0], reverse=True)
+            _, chosen_dy, _next_y, chosen_repeat, chosen_node = scored[0]
+
+            current = chosen_node
             route.append(current)
+            last_dy = chosen_dy
+            same_direction_count = chosen_repeat
+
+        # Defensive assertion: generation must end exactly on END.
+        if current != self.end_node:
+            raise RuntimeError("Generated route did not finish on END.")
 
         return route
 
